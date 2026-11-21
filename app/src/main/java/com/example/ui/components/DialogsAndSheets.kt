@@ -443,7 +443,8 @@ fun DriveSyncSheet(
                                     contentAlignment = Alignment.Center,
                                 ) {
                                     Text(
-                                        text = (settings.googleAccountName ?: settings.googleAccountEmail ?: "ዳ")
+                                        text = (settings.googleAccountName?.takeIf { it.isNotBlank() }
+                                            ?: settings.googleAccountEmail.ifBlank { "ዳ" })
                                             .first()
                                             .uppercase(),
                                         color = MaterialTheme.colorScheme.onPrimary,

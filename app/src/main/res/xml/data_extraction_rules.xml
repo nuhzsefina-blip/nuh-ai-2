@@ -5,10 +5,8 @@
 -->
 <data-extraction-rules>
     <cloud-backup>
-        <!-- TODO: Use <include> and <exclude> to control what is backed up.
-        <include .../>
-        <exclude .../>
-        -->
+        <!-- Cloud auto-backup is disabled via android:allowBackup="false" in AndroidManifest.xml
+             to protect confidential judicial records and encryption keys. -->
     </cloud-backup>
     <!--
     <device-transfer>
