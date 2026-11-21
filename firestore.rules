@@ -1,0 +1,169 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // 1. Global Safety Net (Default Deny)
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // 2. Global Helpers
+    function isValidId(id) {
+      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    // 3. Entity Validation Blueprints
+    function isValidUserProfile(data) {
+      return data.userId is string && data.userId == request.auth.uid && data.userId.size() >= 1 && data.userId.size() <= 128 &&
+             data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 120 &&
+             (!('email' in data) || (data.email is string && data.email.size() <= 200)) &&
+             (!('photoUrl' in data) || (data.photoUrl is string && data.photoUrl.size() <= 500)) &&
+             data.courtName is string && data.courtName.size() <= 160 &&
+             data.createdAt is timestamp && data.createdAt <= request.time &&
+             data.updatedAt is timestamp && data.updatedAt <= request.time;
+    }
+
+    function isValidCloudCase(data) {
+      return data.userId is string && data.userId == request.auth.uid && data.userId.size() >= 1 && data.userId.size() <= 128 &&
+             data.caseNumber is string && data.caseNumber.size() <= 80 &&
+             data.caseType is string && data.caseType in ['APPEAL', 'DIRECT_CIVIL', 'DECREE'] &&
+             data.ethiopianDate is string && data.ethiopianDate.size() <= 40 &&
+             data.gregorianDate is string && data.gregorianDate.size() <= 40 &&
+             data.judges is string && data.judges.size() >= 1 && data.judges.size() <= 300 &&
+             data.plaintiffName is string && data.plaintiffName.size() <= 500 &&
+             data.plaintiffCounsel is string && data.plaintiffCounsel.size() <= 300 &&
+             data.defendantName is string && data.defendantName.size() <= 500 &&
+             data.defendantCounsel is string && data.defendantCounsel.size() <= 300 &&
+             data.unifiedDocumentText is string && data.unifiedDocumentText.size() <= 120000 &&
+             data.judgeNotesText is string && data.judgeNotesText.size() <= 20000 &&
+             data.status is string && data.status in ['DRAFT', 'QUEUED_OFFLINE', 'FINALIZED'] &&
+             data.qualityRating is string && data.qualityRating in ['NONE', 'BAD', 'GOOD', 'EXCELLENT'] &&
+             data.badReasonCategory is string && data.badReasonCategory in ['NONE', 'STYLE', 'LEGAL_ERROR', 'ISSUES', 'LANGUAGE'] &&
+             data.badReasonNote is string && data.badReasonNote.size() <= 2000 &&
+             data.currentVersion is int && data.currentVersion >= 1 && data.currentVersion <= 10000 &&
+             data.contentSha256 is string && data.contentSha256.size() <= 128 &&
+             data.createdAt is timestamp && data.createdAt <= request.time &&
+             data.updatedAt is timestamp && data.updatedAt <= request.time;
+    }
+
+    function isValidResearchNote(data) {
+      return data.userId is string && data.userId == request.auth.uid && data.userId.size() >= 1 && data.userId.size() <= 128 &&
+             data.noteType is string && data.noteType in ['SEARCH', 'TRANSCRIPT', 'LIVE_VOICE'] &&
+             data.title is string && data.title.size() >= 1 && data.title.size() <= 200 &&
+             data.content is string && data.content.size() >= 1 && data.content.size() <= 60000 &&
+             data.sources is list && data.sources.size() <= 20 && (data.sources.size() == 0 || data.sources[0] is string) &&
+             data.caseNumber is string && data.caseNumber.size() <= 80 &&
+             data.createdAt is timestamp && data.createdAt <= request.time &&
+             data.updatedAt is timestamp && data.updatedAt <= request.time;
+    }
+
+    // 4. Collection & Subcollection Rules
+    match /users/{userId} {
+      allow get: if isOwner(userId) && isValidId(userId);
+      allow list: if isOwner(userId);
+
+      allow create: if isOwner(userId) &&
+                       isValidId(userId) &&
+                       incoming().keys().hasAll(['userId', 'displayName', 'courtName', 'createdAt', 'updatedAt']) &&
+                       incoming().keys().hasOnly(['userId', 'displayName', 'email', 'photoUrl', 'courtName', 'createdAt', 'updatedAt']) &&
+                       isValidUserProfile(incoming());
+
+      allow update: if isOwner(userId) &&
+                       isValidId(userId) &&
+                       isValidUserProfile(incoming()) &&
+                       incoming().userId == existing().userId &&
+                       incoming().createdAt == existing().createdAt &&
+                       incoming().diff(existing()).affectedKeys().hasOnly([
+                         'displayName', 'email', 'photoUrl', 'courtName', 'updatedAt'
+                       ]);
+
+      allow delete: if isOwner(userId) && isValidId(userId);
+
+      match /cases/{caseId} {
+        allow get: if isOwner(userId) && isValidId(caseId);
+        allow list: if isOwner(userId);
+
+        allow create: if isOwner(userId) &&
+                         isValidId(caseId) &&
+                         incoming().keys().hasAll([
+                           'userId', 'caseNumber', 'caseType', 'ethiopianDate', 'gregorianDate',
+                           'judges', 'plaintiffName', 'plaintiffCounsel', 'defendantName',
+                           'defendantCounsel', 'unifiedDocumentText', 'judgeNotesText',
+                           'status', 'qualityRating', 'badReasonCategory', 'badReasonNote',
+                           'currentVersion', 'contentSha256', 'createdAt', 'updatedAt'
+                         ]) &&
+                         incoming().keys().hasOnly([
+                           'userId', 'caseNumber', 'caseType', 'ethiopianDate', 'gregorianDate',
+                           'judges', 'plaintiffName', 'plaintiffCounsel', 'defendantName',
+                           'defendantCounsel', 'unifiedDocumentText', 'judgeNotesText',
+                           'status', 'qualityRating', 'badReasonCategory', 'badReasonNote',
+                           'currentVersion', 'contentSha256', 'createdAt', 'updatedAt'
+                         ]) &&
+                         isValidCloudCase(incoming());
+
+        allow update: if isOwner(userId) &&
+                         isValidId(caseId) &&
+                         isValidCloudCase(incoming()) &&
+                         existing().status != 'FINALIZED' &&
+                         incoming().userId == existing().userId &&
+                         incoming().createdAt == existing().createdAt &&
+                         (
+                           // Action: Edit or advance draft metadata/content/status
+                           incoming().diff(existing()).affectedKeys().hasOnly([
+                             'caseNumber', 'caseType', 'ethiopianDate', 'gregorianDate',
+                             'judges', 'plaintiffName', 'plaintiffCounsel', 'defendantName',
+                             'defendantCounsel', 'unifiedDocumentText', 'judgeNotesText',
+                             'status', 'qualityRating', 'badReasonCategory', 'badReasonNote',
+                             'currentVersion', 'contentSha256', 'updatedAt'
+                           ])
+                         );
+
+        allow delete: if isOwner(userId) &&
+                         isValidId(caseId) &&
+                         existing().status != 'FINALIZED';
+      }
+
+      match /research_notes/{noteId} {
+        allow get: if isOwner(userId) && isValidId(noteId);
+        allow list: if isOwner(userId);
+
+        allow create: if isOwner(userId) &&
+                         isValidId(noteId) &&
+                         incoming().keys().hasAll([
+                           'userId', 'noteType', 'title', 'content', 'sources', 'caseNumber', 'createdAt', 'updatedAt'
+                         ]) &&
+                         incoming().keys().hasOnly([
+                           'userId', 'noteType', 'title', 'content', 'sources', 'caseNumber', 'createdAt', 'updatedAt'
+                         ]) &&
+                         isValidResearchNote(incoming());
+
+        allow update: if isOwner(userId) &&
+                         isValidId(noteId) &&
+                         isValidResearchNote(incoming()) &&
+                         incoming().userId == existing().userId &&
+                         incoming().createdAt == existing().createdAt &&
+                         incoming().noteType == existing().noteType &&
+                         incoming().diff(existing()).affectedKeys().hasOnly([
+                           'title', 'content', 'sources', 'caseNumber', 'updatedAt'
+                         ]);
+
+        allow delete: if isOwner(userId) && isValidId(noteId);
+      }
+    }
+  }
+}

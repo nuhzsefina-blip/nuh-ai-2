@@ -1,0 +1,6 @@
+{
+  "name": "ረዳት ዳኛ",
+  "description": "የሐረሪ ብሔራዊ ክልል ከፍተኛ ፍርድ ቤት ዳኛ ረዳት መተግበሪያ - ጭብጥ ማውጣት፣ የውሳኔ/ብይን ረቂቅ ማዘጋጀት፣ ውይይት፣ ማህደር እና PDF መቆለፊያ",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

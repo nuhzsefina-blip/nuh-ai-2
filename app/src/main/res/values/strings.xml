@@ -1,0 +1,21 @@
+<resources>
+    <string name="app_name">ረዳት ዳኛ</string>
+    <string name="court_subtitle">የሐረሪ ብሔራዊ ክልል ከፍተኛ ፍርድ ቤት</string>
+    <string name="tab_case_and_discussion">መዝገብ እና ውይይት</string>
+    <string name="tab_archives">Archives</string>
+    <string name="subtab_draft_builder">የውሳኔ ረቂቅ ማዘጋጃ</string>
+    <string name="subtab_discussion">ውይይትና ማጠቃለያ</string>
+    <string name="cd_api_key_settings">የAPI ቁልፍ እና ሞዴል ማዋቀሪያ</string>
+    <string name="cd_drive_sync">Google Drive ምትኬ እና ማመሳሰል</string>
+    <string name="cd_archive_lock">የArchives መዝገብ ቤት ቁልፍ</string>
+    <string name="cd_court_banner">የሐረሪ ክልል ከፍተኛ ፍርድ ቤት ሚዛን እና የህግ ሰነድ ምስል</string>
+    <string name="auth_welcome_title">እንኳን ወደ ረዳት ዳኛ በደህና መጡ</string>
+    <string name="auth_welcome_subtitle">መዝገቦችዎን በCloud Firestore እና Google Drive ደህንነቱ በተጠበቀ ሁኔታ ለማመሳሰል በGoogle መለያዎ ይግቡ።</string>
+    <string name="auth_sign_in_google">በGoogle ይግቡ</string>
+    <string name="auth_signing_in">በመግባት ላይ…</string>
+    <string name="mic_permission_rationale">የድምጽ ውይይት (Live) እና የማይክሮፎን ቅጂ ለመጠቀም የማይክሮፎን (RECORD_AUDIO) ፍቃድ ያስፈልጋል።</string>
+    <string name="live_voice_tab">የድምጽ ውይይት</string>
+    <string name="legal_search_tab">የህግ ምርምር</string>
+    <string name="audio_transcribe_title">የድምጽ ጽሁፍ መቅጃ (Transcription)</string>
+    <string name="cd_law_reference">የኢትዮጵያ ህጎች ፈጣን ማጣቀሻ</string>
+</resources>

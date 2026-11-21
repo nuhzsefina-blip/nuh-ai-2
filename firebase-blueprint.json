@@ -1,0 +1,235 @@
+{
+  "entities": {
+    "UserProfile": {
+      "title": "UserProfile",
+      "description": "Authenticated judge profile isolated under /users/{userId}.",
+      "type": "object",
+      "properties": {
+        "userId": {
+          "type": "string",
+          "description": "Firebase Auth UID matching document ID and request.auth.uid."
+        },
+        "displayName": {
+          "type": "string",
+          "description": "Display name of the judge."
+        },
+        "email": {
+          "type": "string",
+          "description": "Optional Google account email address."
+        },
+        "photoUrl": {
+          "type": "string",
+          "description": "Optional profile avatar URL."
+        },
+        "courtName": {
+          "type": "string",
+          "description": "Assigned court name."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp set via FieldValue.serverTimestamp()."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp set via FieldValue.serverTimestamp()."
+        }
+      },
+      "required": [
+        "userId",
+        "displayName",
+        "courtName",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "CloudCase": {
+      "title": "CloudCase",
+      "description": "Court case draft or finalized decision synced to Cloud Firestore under a user's private workspace.",
+      "type": "object",
+      "properties": {
+        "userId": {
+          "type": "string",
+          "description": "Owner UID matching request.auth.uid."
+        },
+        "caseNumber": {
+          "type": "string",
+          "description": "Court case number."
+        },
+        "caseType": {
+          "type": "string",
+          "enum": ["APPEAL", "DIRECT_CIVIL", "DECREE"],
+          "description": "Judicial document category."
+        },
+        "ethiopianDate": {
+          "type": "string",
+          "description": "Ethiopian calendar date string."
+        },
+        "gregorianDate": {
+          "type": "string",
+          "description": "Gregorian calendar date string."
+        },
+        "judges": {
+          "type": "string",
+          "description": "Presiding judge(s)."
+        },
+        "plaintiffName": {
+          "type": "string",
+          "description": "Plaintiff or appellant name(s)."
+        },
+        "plaintiffCounsel": {
+          "type": "string",
+          "description": "Plaintiff counsel name."
+        },
+        "defendantName": {
+          "type": "string",
+          "description": "Defendant or respondent name(s)."
+        },
+        "defendantCounsel": {
+          "type": "string",
+          "description": "Defendant counsel name."
+        },
+        "unifiedDocumentText": {
+          "type": "string",
+          "description": "Complete unified Amharic court judgment/decree text."
+        },
+        "judgeNotesText": {
+          "type": "string",
+          "description": "AI verification notes for the judge."
+        },
+        "status": {
+          "type": "string",
+          "enum": ["DRAFT", "QUEUED_OFFLINE", "FINALIZED"],
+          "description": "Workflow status; FINALIZED is terminal and read-only."
+        },
+        "qualityRating": {
+          "type": "string",
+          "enum": ["NONE", "BAD", "GOOD", "EXCELLENT"],
+          "description": "Judge quality grade for the draft."
+        },
+        "badReasonCategory": {
+          "type": "string",
+          "enum": ["NONE", "STYLE", "LEGAL_ERROR", "ISSUES", "LANGUAGE"],
+          "description": "Feedback category when rated BAD."
+        },
+        "badReasonNote": {
+          "type": "string",
+          "description": "Optional feedback explanation when rated BAD."
+        },
+        "currentVersion": {
+          "type": "integer",
+          "description": "Revision counter starting at 1."
+        },
+        "contentSha256": {
+          "type": "string",
+          "description": "SHA-256 digest of the canonical case content."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp set via FieldValue.serverTimestamp()."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp set via FieldValue.serverTimestamp()."
+        }
+      },
+      "required": [
+        "userId",
+        "caseNumber",
+        "caseType",
+        "ethiopianDate",
+        "gregorianDate",
+        "judges",
+        "plaintiffName",
+        "plaintiffCounsel",
+        "defendantName",
+        "defendantCounsel",
+        "unifiedDocumentText",
+        "judgeNotesText",
+        "status",
+        "qualityRating",
+        "badReasonCategory",
+        "badReasonNote",
+        "currentVersion",
+        "contentSha256",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "LegalResearchNote": {
+      "title": "LegalResearchNote",
+      "description": "Saved legal research from Google Search Grounding, Live API voice discussions, or audio transcriptions.",
+      "type": "object",
+      "properties": {
+        "userId": {
+          "type": "string",
+          "description": "Owner UID matching request.auth.uid."
+        },
+        "noteType": {
+          "type": "string",
+          "enum": ["SEARCH", "TRANSCRIPT", "LIVE_VOICE"],
+          "description": "Origin type of the saved research or transcript note."
+        },
+        "title": {
+          "type": "string",
+          "description": "Short descriptive title."
+        },
+        "content": {
+          "type": "string",
+          "description": "Saved Amharic/legal text or transcript."
+        },
+        "sources": {
+          "type": "array",
+          "description": "Up to 20 source URLs or labels from Google Search Grounding."
+        },
+        "caseNumber": {
+          "type": "string",
+          "description": "Optional associated case number."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp set via FieldValue.serverTimestamp()."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp set via FieldValue.serverTimestamp()."
+        }
+      },
+      "required": [
+        "userId",
+        "noteType",
+        "title",
+        "content",
+        "sources",
+        "caseNumber",
+        "createdAt",
+        "updatedAt"
+      ]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": {
+        "$ref": "#/entities/UserProfile"
+      },
+      "description": "Private user profile document for each authenticated judge."
+    },
+    "/users/{userId}/cases/{caseId}": {
+      "schema": {
+        "$ref": "#/entities/CloudCase"
+      },
+      "description": "Synced judicial case drafts and finalized archives owned by {userId}."
+    },
+    "/users/{userId}/research_notes/{noteId}": {
+      "schema": {
+        "$ref": "#/entities/LegalResearchNote"
+      },
+      "description": "Saved Google Search Grounding answers, audio transcripts, and Live API voice summaries owned by {userId}."
+    }
+  }
+}

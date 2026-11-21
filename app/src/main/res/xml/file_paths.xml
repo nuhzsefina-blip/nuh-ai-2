@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<paths>
+    <files-path name="judicial_pdfs" path="pdfs/" />
+    <files-path name="judicial_docx" path="docx/" />
+    <files-path name="judicial_backups" path="backups/" />
+    <cache-path name="camera_captures" path="captures/" />
+</paths>
