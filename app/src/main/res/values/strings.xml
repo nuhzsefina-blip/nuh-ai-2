@@ -18,4 +18,5 @@
     <string name="legal_search_tab">የህግ ምርምር</string>
     <string name="audio_transcribe_title">የድምጽ ጽሁፍ መቅጃ (Transcription)</string>
     <string name="cd_law_reference">የኢትዮጵያ ህጎች ፈጣን ማጣቀሻ</string>
+    <string name="notification_permission_rationale">የችሎት ቀጠሮ እና የረቂቅ ውሳኔ ማሳወቂያዎች እንዲደርሱዎት የNotification ፍቃድ ያስፈልጋል።</string>
 </resources>

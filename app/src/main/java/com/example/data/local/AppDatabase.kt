@@ -55,6 +55,9 @@ abstract class AppDatabase : RoomDatabase() {
         @Volatile
         private var INSTANCE: AppDatabase? = null
 
+        @Volatile
+        private var seedsVerifiedInProcess: Boolean = false
+
         fun getInstance(context: Context, prefs: SecurePrefsManager): AppDatabase {
             return INSTANCE ?: synchronized(this) {
                 INSTANCE ?: buildDatabase(context.applicationContext, prefs).also { INSTANCE = it }
@@ -77,13 +80,17 @@ abstract class AppDatabase : RoomDatabase() {
                         super.onCreate(db)
                         CoroutineScope(Dispatchers.IO).launch {
                             seedAnonymizedTemplates(getInstance(context, prefs).caseDao())
+                            seedsVerifiedInProcess = true
                         }
                     }
 
                     override fun onOpen(db: SupportSQLiteDatabase) {
                         super.onOpen(db)
-                        CoroutineScope(Dispatchers.IO).launch {
-                            ensureLatestSeedTemplates(getInstance(context, prefs).caseDao())
+                        if (!seedsVerifiedInProcess) {
+                            CoroutineScope(Dispatchers.IO).launch {
+                                ensureLatestSeedTemplates(getInstance(context, prefs).caseDao())
+                                seedsVerifiedInProcess = true
+                            }
                         }
                     }
                 })

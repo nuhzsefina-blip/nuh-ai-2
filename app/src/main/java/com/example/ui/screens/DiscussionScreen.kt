@@ -12,6 +12,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -22,11 +23,15 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Bolt
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.EditNote
+import androidx.compose.material.icons.filled.ExpandLess
+import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.Key
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowUp
@@ -133,7 +138,9 @@ fun DiscussionScreen(
     onRunGroundedSearch: (String) -> Unit = {},
     onSaveSearchNote: (GroundedSearchResult) -> Unit = {},
     onDeleteSavedNote: (String) -> Unit = {},
-    headerVisibleFraction: Float = 1f,
+    transferEventToken: Long = 0L,
+    onBackToDraft: () -> Unit = {},
+    headerVisibleFractionProvider: () -> Float = { 1f },
     onExpandTopChrome: () -> Unit = {},
 ) {
     var mode by rememberSaveable { mutableStateOf(DiscussionMode.TEXT_CHAT) }
@@ -142,6 +149,13 @@ fun DiscussionScreen(
     val listState = rememberLazyListState()
     val coroutineScope = rememberCoroutineScope()
     val isReadOnly = activeCase.status == CaseStatus.FINALIZED
+
+    LaunchedEffect(transferEventToken) {
+        if (transferEventToken > 0L) {
+            mode = DiscussionMode.TEXT_CHAT
+            onExpandTopChrome()
+        }
+    }
 
     LaunchedEffect(injectedChatDraft) {
         if (!injectedChatDraft.isNullOrBlank()) {
@@ -176,14 +190,15 @@ fun DiscussionScreen(
     ) {
         Column(modifier = Modifier.widthIn(max = 700.dp).fillMaxSize()) {
             // Mode Switcher: Text Chat | Live Voice (gemini-3.8-live) | Legal Search (gemini-4-hydrogen)
-            val modeRowFraction = if (mode == DiscussionMode.TEXT_CHAT) headerVisibleFraction.coerceIn(0f, 1f) else 1f
+            val isTextChatMode = mode == DiscussionMode.TEXT_CHAT
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
                     .clipToBounds()
                     .layout { measurable, constraints ->
                         val placeable = measurable.measure(constraints)
-                        val h = (placeable.height * modeRowFraction).roundToInt()
+                        val fraction = if (isTextChatMode) headerVisibleFractionProvider().coerceIn(0f, 1f) else 1f
+                        val h = (placeable.height * fraction).roundToInt()
                         layout(placeable.width, h) {
                             placeable.placeRelative(0, h - placeable.height)
                         }
@@ -251,11 +266,23 @@ fun DiscussionScreen(
                 DiscussionMode.TEXT_CHAT -> {
                     val quickSuggestions = remember {
                         listOf(
+                            "በውሳኔው ላይ አዲስ ነጥብ ጨምር: ",
+                            "ይህንን ክፍል ቀንስ / አሳጥር: ",
                             "ጭብጡን በፍርዱ ውስጥ አጠናክር",
                             "ወጪ እና ኪሳራ ክፍሉን አሳጥር",
                             "ህጋዊ አንቀጾችን አረጋግጥና አስተካክል",
                         )
                     }
+                    val hasDraftContext = remember(
+                        activeCase.id,
+                        activeCase.issuesText,
+                        activeCase.analysisText,
+                        activeCase.decisionText,
+                        activeCase.closingText,
+                    ) {
+                        JudicialDocumentFormatter.hasDraftContent(activeCase)
+                    }
+                    var isDraftPreviewExpanded by remember(activeCase.id) { mutableStateOf(false) }
 
                     // Chat History + Quick Suggestions + Diff Cards
                     Box(
@@ -269,6 +296,117 @@ fun DiscussionScreen(
                             contentPadding = PaddingValues(top = 2.dp, bottom = 14.dp),
                             verticalArrangement = Arrangement.spacedBy(10.dp),
                         ) {
+                            if (hasDraftContext) {
+                                item(key = "transferred_draft_context_card") {
+                                    val fullDocText = remember(
+                                        activeCase.id,
+                                        activeCase.currentVersion,
+                                        activeCase.caseNumber,
+                                        activeCase.issuesText,
+                                        activeCase.analysisText,
+                                        activeCase.decisionText,
+                                        activeCase.closingText,
+                                    ) {
+                                        JudicialDocumentFormatter.composeUnifiedDocument(activeCase)
+                                    }
+                                    val previewSnippet = remember(fullDocText) {
+                                        JudicialDocumentFormatter.extractPreviewSnippet(activeCase)
+                                    }
+                                    ElevatedCard(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .testTag("transferred_draft_context_card"),
+                                        shape = RoundedCornerShape(14.dp),
+                                    ) {
+                                        Column(
+                                            modifier = Modifier.padding(12.dp),
+                                            verticalArrangement = Arrangement.spacedBy(8.dp),
+                                        ) {
+                                            Row(
+                                                modifier = Modifier.fillMaxWidth(),
+                                                horizontalArrangement = Arrangement.SpaceBetween,
+                                                verticalAlignment = Alignment.CenterVertically,
+                                            ) {
+                                                Row(
+                                                    modifier = Modifier.weight(1f),
+                                                    verticalAlignment = Alignment.CenterVertically,
+                                                ) {
+                                                    Icon(
+                                                        Icons.Default.Description,
+                                                        contentDescription = null,
+                                                        tint = MaterialTheme.colorScheme.primary,
+                                                        modifier = Modifier.size(18.dp),
+                                                    )
+                                                    Spacer(Modifier.width(6.dp))
+                                                    Column {
+                                                        Text(
+                                                            text = if (activeCase.caseNumber.isNotBlank()) {
+                                                                "የተሸጋገረ ውሳኔ • መ/ቁ ${activeCase.caseNumber}"
+                                                            } else {
+                                                                "የተሸጋገረ ረቂቅ ውሳኔ"
+                                                            },
+                                                            style = MaterialTheme.typography.titleSmall,
+                                                            fontWeight = FontWeight.Bold,
+                                                        )
+                                                        Text(
+                                                            text = "${activeCase.caseType.amharicLabel} • ስሪት v${activeCase.currentVersion}",
+                                                            style = MaterialTheme.typography.labelSmall,
+                                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                                        )
+                                                    }
+                                                }
+                                                IconButton(
+                                                    onClick = { isDraftPreviewExpanded = !isDraftPreviewExpanded },
+                                                    modifier = Modifier.testTag("toggle_transferred_draft_preview"),
+                                                ) {
+                                                    Icon(
+                                                        if (isDraftPreviewExpanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
+                                                        contentDescription = if (isDraftPreviewExpanded) "ረቂቁን ሰብስብ" else "ሙሉ ውሳኔውን እይ",
+                                                    )
+                                                }
+                                            }
+
+                                            Text(
+                                                text = if (isDraftPreviewExpanded) fullDocText else previewSnippet,
+                                                style = MaterialTheme.typography.bodySmall,
+                                                color = MaterialTheme.colorScheme.onSurface,
+                                                maxLines = if (isDraftPreviewExpanded) Int.MAX_VALUE else 3,
+                                                overflow = TextOverflow.Ellipsis,
+                                            )
+
+                                            Row(
+                                                modifier = Modifier.fillMaxWidth(),
+                                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                            ) {
+                                                OutlinedButton(
+                                                    onClick = onBackToDraft,
+                                                    modifier = Modifier
+                                                        .heightIn(min = 48.dp)
+                                                        .testTag("back_to_draft_button"),
+                                                ) {
+                                                    Icon(
+                                                        Icons.AutoMirrored.Filled.ArrowBack,
+                                                        contentDescription = null,
+                                                        modifier = Modifier.size(16.dp),
+                                                    )
+                                                    Spacer(Modifier.width(4.dp))
+                                                    Text("ወደ ረቂቅ ተመለስ", maxLines = 1)
+                                                }
+                                                OutlinedButton(
+                                                    onClick = { isDraftPreviewExpanded = !isDraftPreviewExpanded },
+                                                    modifier = Modifier.heightIn(min = 48.dp),
+                                                ) {
+                                                    Text(
+                                                        if (isDraftPreviewExpanded) "ሰብስብ" else "ሙሉውን እይ",
+                                                        maxLines = 1,
+                                                    )
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
                             item(key = "quick_suggestions_header") {
                                 Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                                     Text("ፈጣን የውይይት መመሪያዎች:", style = MaterialTheme.typography.labelLarge)

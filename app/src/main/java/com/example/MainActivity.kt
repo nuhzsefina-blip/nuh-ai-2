@@ -4,6 +4,7 @@ import android.Manifest
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
 import android.view.WindowManager
 import androidx.activity.SystemBarStyle
@@ -14,6 +15,7 @@ import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.IntentSenderRequest
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
@@ -94,6 +96,7 @@ import com.example.pdf.JudicialPrintHelper
 import com.example.security.BiometricAuthManager
 import com.example.security.GoogleDriveAuthManager
 import com.example.security.SecurePrefsManager
+import com.example.security.AppSecuritySettings
 import com.example.security.configureAppCheck
 import com.example.ui.components.ArchiveSecuritySheet
 import com.example.ui.components.AudioTranscribeSheet
@@ -110,12 +113,14 @@ import com.example.ui.components.TranscribeTarget
 import com.example.ui.components.VersionHistorySheet
 import com.example.util.EthiopianCalendarUtil
 import com.example.util.JudicialDocumentFormatter
+import com.example.util.NotificationHelper
 import com.example.util.PastJudgmentParser
 import com.example.ui.screens.ArchivesScreen
 import com.example.ui.screens.AuthScreen
 import com.example.ui.screens.DiscussionScreen
 import com.example.ui.screens.DraftBuilderScreen
 import com.example.ui.theme.RedatDagnaTheme
+import com.example.ui.viewmodel.AttachmentTarget
 import com.example.ui.viewmodel.JudicialViewModel
 import com.example.ui.viewmodel.MainMenuTab
 import com.example.ui.viewmodel.WorkSubTab
@@ -131,16 +136,33 @@ private enum class PendingMicPurpose {
 }
 
 class MainActivity : FragmentActivity() {
+    private val pendingNotificationCaseId = mutableStateOf(-1L)
+
+    private fun extractNotificationCaseId(intent: Intent?): Long {
+        return intent?.getLongExtra(NotificationHelper.EXTRA_CASE_ID, -1L) ?: -1L
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        val targetCaseId = extractNotificationCaseId(intent)
+        if (targetCaseId > 0L) {
+            pendingNotificationCaseId.value = targetCaseId
+        }
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
         // Configure Firebase App Check with launch intent BEFORE UI or ViewModels
         configureAppCheck(this, intent)
+        NotificationHelper.ensureChannels(applicationContext)
+        pendingNotificationCaseId.value = extractNotificationCaseId(intent)
 
         enableEdgeToEdge()
 
         setContent {
-            val prefs = remember { SecurePrefsManager(applicationContext) }
+            val prefs = remember { SecurePrefsManager.getInstance(applicationContext) }
             val globalSettings by prefs.settings.collectAsStateWithLifecycle()
 
             LaunchedEffect(globalSettings.flagSecureEnabled) {
@@ -202,8 +224,11 @@ class MainActivity : FragmentActivity() {
                         val lifecycleOwner = LocalLifecycleOwner.current
                         DisposableEffect(lifecycleOwner, judicialViewModel) {
                             val observer = LifecycleEventObserver { _, event ->
-                                if (event == Lifecycle.Event.ON_RESUME) {
-                                    judicialViewModel.checkAutoLockTimeout()
+                                when (event) {
+                                    Lifecycle.Event.ON_START -> judicialViewModel.setAppInForeground(true)
+                                    Lifecycle.Event.ON_RESUME -> judicialViewModel.checkAutoLockTimeout()
+                                    Lifecycle.Event.ON_STOP -> judicialViewModel.setAppInForeground(false)
+                                    else -> Unit
                                 }
                             }
                             lifecycleOwner.lifecycle.addObserver(observer)
@@ -214,6 +239,8 @@ class MainActivity : FragmentActivity() {
                             activity = this@MainActivity,
                             viewModel = judicialViewModel,
                             signedInEmail = user.email.orEmpty(),
+                            pendingNotificationCaseId = pendingNotificationCaseId.value,
+                            onConsumeNotificationCaseId = { pendingNotificationCaseId.value = -1L },
                         )
                     }
                 }
@@ -228,51 +255,78 @@ private fun RedatDagnaApp(
     activity: FragmentActivity,
     viewModel: JudicialViewModel,
     signedInEmail: String,
+    pendingNotificationCaseId: Long,
+    onConsumeNotificationCaseId: () -> Unit,
 ) {
     val mainTab by viewModel.mainTab.collectAsStateWithLifecycle()
     val workSubTab by viewModel.workSubTab.collectAsStateWithLifecycle()
-    val isArchivesUnlocked by viewModel.isArchivesUnlocked.collectAsStateWithLifecycle()
-    val activeCase by viewModel.activeCase.collectAsStateWithLifecycle()
-    val recentWorkCases by viewModel.allWorkCases.collectAsStateWithLifecycle()
-    val plaintiffAttachments by viewModel.plaintiffAttachments.collectAsStateWithLifecycle()
-    val defendantAttachments by viewModel.defendantAttachments.collectAsStateWithLifecycle()
-    val pipelineState by viewModel.pipelineState.collectAsStateWithLifecycle()
-    val isChatSending by viewModel.isChatSending.collectAsStateWithLifecycle()
-    val streamingChatReply by viewModel.streamingChatReply.collectAsStateWithLifecycle()
-    val chatError by viewModel.chatError.collectAsStateWithLifecycle()
     val statusBanner by viewModel.statusBanner.collectAsStateWithLifecycle()
     val settings by viewModel.securitySettings.collectAsStateWithLifecycle()
-    val archivedCount by viewModel.archivedCount.collectAsStateWithLifecycle()
-    val pendingSyncCount by viewModel.pendingSyncCount.collectAsStateWithLifecycle()
-    val versions by viewModel.activeCaseVersions.collectAsStateWithLifecycle()
-    val chatMessages by viewModel.activeChatMessages.collectAsStateWithLifecycle()
-    val searchQuery by viewModel.archiveSearchQuery.collectAsStateWithLifecycle()
-    val ratingFilter by viewModel.archiveRatingFilter.collectAsStateWithLifecycle()
-    val typeFilter by viewModel.archiveTypeFilter.collectAsStateWithLifecycle()
-    val archivePinnedOnly by viewModel.archivePinnedOnly.collectAsStateWithLifecycle()
-    val archiveSubjectFilter by viewModel.archiveSubjectFilter.collectAsStateWithLifecycle()
-    val pagedArchives = viewModel.archivedPagedCases.collectAsLazyPagingItems()
-    val latestPdfResult by viewModel.latestPdfResult.collectAsStateWithLifecycle()
-    val isPdfGenerating by viewModel.isPdfGenerating.collectAsStateWithLifecycle()
-    val latestDocxResult by viewModel.latestDocxResult.collectAsStateWithLifecycle()
-    val isDocxGenerating by viewModel.isDocxGenerating.collectAsStateWithLifecycle()
-    val pdfVerificationResult by viewModel.pdfVerificationResult.collectAsStateWithLifecycle()
-    val isDriveBusy by viewModel.isDriveBusy.collectAsStateWithLifecycle()
-    val driveError by viewModel.driveError.collectAsStateWithLifecycle()
-    val driveBackups by viewModel.driveBackups.collectAsStateWithLifecycle()
     val pendingDriveResolution by viewModel.pendingDriveResolution.collectAsStateWithLifecycle()
-
-    // Live API, Search Grounding, Saved Cloud Notes, and Audio Transcription states
-    val liveVoiceState by viewModel.liveVoiceState.collectAsStateWithLifecycle()
-    val searchGroundingState by viewModel.searchGroundingState.collectAsStateWithLifecycle()
-    val savedResearchNotes by viewModel.savedResearchNotes.collectAsStateWithLifecycle()
-    val audioTranscribeState by viewModel.audioTranscribeState.collectAsStateWithLifecycle()
-    val pendingChatDraftInjection by viewModel.pendingChatDraftInjection.collectAsStateWithLifecycle()
-    val archiveImportState by viewModel.archiveImportState.collectAsStateWithLifecycle()
 
     val snackbarHostState = remember { SnackbarHostState() }
     val uiScope = rememberCoroutineScope()
     val micRationale = stringResource(R.string.mic_permission_rationale)
+    val notificationRationale = stringResource(R.string.notification_permission_rationale)
+
+    var hasNotificationPermission by remember {
+        mutableStateOf(NotificationHelper.hasSystemPermission(activity))
+    }
+    var sendTestAfterNotificationPermission by remember { mutableStateOf(false) }
+    var promptedNotificationOnAdjournment by remember { mutableStateOf(false) }
+
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner) {
+        val obs = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                hasNotificationPermission = NotificationHelper.hasSystemPermission(activity)
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(obs)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(obs) }
+    }
+
+    val notificationPermissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        hasNotificationPermission = granted || NotificationHelper.hasSystemPermission(activity)
+        val shouldTest = sendTestAfterNotificationPermission
+        sendTestAfterNotificationPermission = false
+        if (granted) {
+            if (shouldTest) {
+                viewModel.sendTestNotification()
+            } else {
+                uiScope.launch {
+                    snackbarHostState.showSnackbar("የNotification ፍቃድ ተሰጥቷል።")
+                }
+            }
+        } else {
+            uiScope.launch {
+                snackbarHostState.showSnackbar(notificationRationale)
+            }
+        }
+    }
+
+    fun requestNotificationPermissionIfNeeded(sendTestAfter: Boolean = false) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            !NotificationHelper.hasSystemPermission(activity)
+        ) {
+            sendTestAfterNotificationPermission = sendTestAfter
+            notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+        } else {
+            hasNotificationPermission = true
+            if (sendTestAfter) {
+                viewModel.sendTestNotification()
+            }
+        }
+    }
+
+    LaunchedEffect(pendingNotificationCaseId) {
+        if (pendingNotificationCaseId > 0L) {
+            viewModel.openCaseById(pendingNotificationCaseId)
+            onConsumeNotificationCaseId()
+        }
+    }
 
     LaunchedEffect(statusBanner) {
         statusBanner?.let { msg ->
@@ -345,21 +399,21 @@ private fun RedatDagnaApp(
     }
 
     // Attachment target tracking
-    var targetIsPlaintiff by remember { mutableStateOf(true) }
+    var attachmentTarget by remember { mutableStateOf(AttachmentTarget.PLAINTIFF) }
     var pendingCameraUri by remember { mutableStateOf<Uri?>(null) }
 
     // Photo Picker (Zero permission per Play Policy)
     val photoPickerLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.PickMultipleVisualMedia(20)
     ) { uris ->
-        viewModel.addAttachments(uris, targetIsPlaintiff)
+        viewModel.addAttachments(uris, attachmentTarget)
     }
 
     // Document Picker (PDF / Word / Images via SAF)
     val docPickerLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.OpenMultipleDocuments()
     ) { uris ->
-        viewModel.addAttachments(uris, targetIsPlaintiff)
+        viewModel.addAttachments(uris, attachmentTarget)
     }
 
     // Archive Past Judgments Multi-File Uploaders (SAF + Photo Picker, zero storage permissions)
@@ -385,7 +439,7 @@ private fun RedatDagnaApp(
     ) { success ->
         val uri = pendingCameraUri
         if (success && uri != null) {
-            viewModel.addAttachments(listOf(uri), targetIsPlaintiff)
+            viewModel.addAttachments(listOf(uri), attachmentTarget)
         }
     }
 
@@ -429,8 +483,8 @@ private fun RedatDagnaApp(
         driveAuthResolutionLauncher.launch(IntentSenderRequest.Builder(intentSender).build())
     }
 
-    fun launchCamera(isPlaintiff: Boolean) {
-        targetIsPlaintiff = isPlaintiff
+    fun launchCamera(target: AttachmentTarget) {
+        attachmentTarget = target
         val dir = File(activity.cacheDir, "captures").apply { mkdirs() }
         val photoFile = File.createTempFile("doc_capture_", ".jpg", dir)
         val uri = FileProvider.getUriForFile(activity, "${activity.packageName}.fileprovider", photoFile)
@@ -463,7 +517,6 @@ private fun RedatDagnaApp(
     val isImeVisible = WindowInsets.isImeVisible
     val topBarState = rememberTopAppBarState()
     val scrollBehavior = TopAppBarDefaults.enterAlwaysScrollBehavior(topBarState)
-    val visibleTopFraction = (1f - scrollBehavior.state.collapsedFraction).coerceIn(0f, 1f)
 
     LaunchedEffect(mainTab, workSubTab) {
         topBarState.heightOffset = 0f
@@ -501,71 +554,18 @@ private fun RedatDagnaApp(
                         }
                     },
                     actions = {
-                        IconButton(
-                            onClick = { showLawReferenceSheet = true },
-                            modifier = Modifier.testTag("top_law_reference_button"),
-                        ) {
-                            Icon(
-                                Icons.AutoMirrored.Filled.MenuBook,
-                                contentDescription = stringResource(R.string.cd_law_reference),
-                            )
-                        }
-                        IconButton(
-                            onClick = { showSettingsSheet = true },
-                            modifier = Modifier.testTag("top_key_button"),
-                        ) {
-                            Icon(
-                                Icons.Default.Key,
-                                contentDescription = stringResource(R.string.cd_api_key_settings),
-                            )
-                        }
-                        IconButton(
-                            onClick = {
+                        RedatTopBarActions(
+                            viewModel = viewModel,
+                            settings = settings,
+                            onOpenLawReference = { showLawReferenceSheet = true },
+                            onOpenSettings = { showSettingsSheet = true },
+                            onOpenDriveSync = {
                                 showDriveSyncSheet = true
                                 viewModel.refreshDriveBackups(activity)
                             },
-                            modifier = Modifier.testTag("top_cloud_button"),
-                        ) {
-                            BadgedBox(
-                                badge = {
-                                    if (pendingSyncCount > 0) {
-                                        Badge { Text(pendingSyncCount.toString()) }
-                                    }
-                                }
-                            ) {
-                                Icon(
-                                    if (settings.driveApiAuthorized && !settings.googleAccountEmail.isNullOrBlank()) {
-                                        Icons.Default.CloudDone
-                                    } else {
-                                        Icons.Default.CloudSync
-                                    },
-                                    contentDescription = stringResource(R.string.cd_drive_sync),
-                                    tint = if (settings.driveApiAuthorized && !settings.googleAccountEmail.isNullOrBlank()) {
-                                        com.example.ui.theme.VerifiedEmerald
-                                    } else {
-                                        MaterialTheme.colorScheme.onSurface
-                                    },
-                                )
-                            }
-                        }
-                        IconButton(
-                            onClick = { showSecuritySheet = true },
-                            modifier = Modifier.testTag("top_lock_button"),
-                        ) {
-                            Icon(
-                                if (isArchivesUnlocked) Icons.Default.LockOpen else Icons.Default.Lock,
-                                contentDescription = stringResource(R.string.cd_archive_lock),
-                            )
-                        }
-                        IconButton(
-                            onClick = { showSignOutDialog = true },
-                            modifier = Modifier.testTag("top_sign_out_button"),
-                        ) {
-                            Icon(
-                                Icons.AutoMirrored.Filled.Logout,
-                                contentDescription = "ከGoogle መለያ ውጣ",
-                            )
-                        }
+                            onOpenSecurity = { showSecuritySheet = true },
+                            onOpenSignOut = { showSignOutDialog = true },
+                        )
                     },
                 )
             },
@@ -582,15 +582,7 @@ private fun RedatDagnaApp(
                         NavigationBarItem(
                             selected = mainTab == MainMenuTab.ARCHIVES,
                             onClick = { viewModel.selectMainTab(MainMenuTab.ARCHIVES) },
-                            icon = {
-                                BadgedBox(
-                                    badge = {
-                                        if (archivedCount > 0) Badge { Text(archivedCount.toString()) }
-                                    }
-                                ) {
-                                    Icon(Icons.Default.FolderSpecial, contentDescription = null)
-                                }
-                            },
+                            icon = { ArchivesNavIconWithBadge(viewModel) },
                             label = { Text(stringResource(R.string.tab_archives), maxLines = 1) },
                             modifier = Modifier.testTag("nav_archives"),
                         )
@@ -616,7 +608,7 @@ private fun RedatDagnaApp(
                             selected = mainTab == MainMenuTab.ARCHIVES,
                             onClick = { viewModel.selectMainTab(MainMenuTab.ARCHIVES) },
                             icon = { Icon(Icons.Default.FolderSpecial, contentDescription = null) },
-                            label = { Text("${stringResource(R.string.tab_archives)} ($archivedCount)") },
+                            label = { ArchivesRailLabel(viewModel) },
                         )
                     }
                 }
@@ -624,12 +616,13 @@ private fun RedatDagnaApp(
                 Column(modifier = Modifier.weight(1f).fillMaxSize()) {
                     when (mainTab) {
                         MainMenuTab.CASE_AND_DISCUSSION -> {
-                            androidx.compose.foundation.layout.Box(
+                            Box(
                                 modifier = Modifier
                                     .clipToBounds()
                                     .layout { measurable, constraints ->
                                         val placeable = measurable.measure(constraints)
-                                        val currentHeight = (placeable.height * visibleTopFraction).roundToInt()
+                                        val visibleFraction = (1f - scrollBehavior.state.collapsedFraction).coerceIn(0f, 1f)
+                                        val currentHeight = (placeable.height * visibleFraction).roundToInt()
                                         layout(placeable.width, currentHeight) {
                                             placeable.placeRelative(0, currentHeight - placeable.height)
                                         }
@@ -653,25 +646,18 @@ private fun RedatDagnaApp(
 
                             when (workSubTab) {
                                 WorkSubTab.DRAFT_BUILDER -> {
-                                    DraftBuilderScreen(
-                                        activeCase = activeCase,
-                                        recentWorkCases = recentWorkCases,
-                                        plaintiffAttachments = plaintiffAttachments,
-                                        defendantAttachments = defendantAttachments,
-                                        pipelineState = pipelineState,
-                                        onStartNewCase = viewModel::startNewCase,
-                                        onSelectRecentCase = viewModel::openExistingCase,
-                                        onCaseTypeChange = viewModel::updateCaseType,
-                                        onMetadataChange = viewModel::updateActiveCaseMetadata,
+                                    DraftBuilderRoute(
+                                        viewModel = viewModel,
+                                        settings = settings,
                                         onOpenDatePicker = { showDatePicker = true },
-                                        onPickPhotos = { isP ->
-                                            targetIsPlaintiff = isP
+                                        onPickPhotos = { target ->
+                                            attachmentTarget = target
                                             photoPickerLauncher.launch(
                                                 PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
                                             )
                                         },
-                                        onPickDocuments = { isP ->
-                                            targetIsPlaintiff = isP
+                                        onPickDocuments = { target ->
+                                            attachmentTarget = target
                                             docPickerLauncher.launch(
                                                 arrayOf(
                                                     "application/pdf",
@@ -681,7 +667,6 @@ private fun RedatDagnaApp(
                                             )
                                         },
                                         onCaptureCamera = ::launchCamera,
-                                        onRemoveAttachment = viewModel::removeAttachment,
                                         onLaunchVoiceInstructions = {
                                             transcribeTarget = TranscribeTarget.SPECIAL_INSTRUCTIONS
                                             ensureAudioPermissionAndRun(PendingMicPurpose.AUDIO_TRANSCRIBE) {
@@ -690,56 +675,29 @@ private fun RedatDagnaApp(
                                                 viewModel.startAudioRecording()
                                             }
                                         },
-                                        onStartOcr = viewModel::startStage1Ocr,
-                                        onUpdateOcrTexts = viewModel::updateOcrReviewTexts,
-                                        onConfirmOcrAndDraft = viewModel::confirmOcrAndGenerateDraft,
-                                        onCancelPipeline = viewModel::cancelAiJob,
-                                        onUpdateUnifiedDocument = viewModel::updateUnifiedDocumentManually,
-                                        onSaveManualVersion = viewModel::saveManualVersionSnapshot,
                                         onOpenVersionHistory = { showVersionHistory = true },
-                                        onRateGoodOrExcellent = { rating -> viewModel.rateDraft(rating) },
                                         onOpenBadRatingDialog = { showBadRatingDialog = true },
-                                        onFinalizeToArchive = viewModel::finalizeToArchive,
-                                        onOpenPdfExport = {
+                                        onOpenPdfExport = { caseEntity ->
                                             viewModel.dismissLatestPdfResult()
                                             viewModel.dismissLatestDocxResult()
-                                            pdfDialogCase = activeCase
+                                            pdfDialogCase = caseEntity
                                         },
                                         onOpenSettings = { showSettingsSheet = true },
-                                        activeSubjectTag = PastJudgmentParser.resolveMapValue(settings.subjectTags, activeCase),
-                                        activeAdjournmentDate = PastJudgmentParser.resolveMapValue(settings.adjournmentDates, activeCase),
-                                        onAutoFillFromOcr = { viewModel.autoFillMetadataFromOcr(overwriteExisting = true) },
-                                        onApplyPreset = viewModel::applyJudicialPreset,
-                                        onSelectSubjectTag = { tag -> viewModel.setCaseSubjectTag(activeCase, tag) },
                                         onOpenAdjournmentPicker = { showAdjournmentDatePicker = true },
-                                        onQuickAdjournmentDays = { days ->
-                                            val (etNext, _) = EthiopianCalendarUtil.addDaysToEthiopian(activeCase.ethiopianDate, days)
-                                            viewModel.setCaseAdjournmentDate(activeCase, etNext)
+                                        onAfterAdjournmentScheduled = {
+                                            if (settings.notificationsEnabled && !hasNotificationPermission && !promptedNotificationOnAdjournment) {
+                                                promptedNotificationOnAdjournment = true
+                                                requestNotificationPermissionIfNeeded(sendTestAfter = false)
+                                            }
                                         },
-                                        onClearAdjournment = { viewModel.setCaseAdjournmentDate(activeCase, null) },
                                         onOpenFullScreenEditor = { showFullScreenEditor = true },
                                         onOpenLawReference = { showLawReferenceSheet = true },
                                         onExpandTopChrome = { topBarState.heightOffset = 0f },
                                     )
                                 }
                                 WorkSubTab.DISCUSSION -> {
-                                    DiscussionScreen(
-                                        activeCase = activeCase,
-                                        messages = chatMessages,
-                                        isSending = isChatSending,
-                                        streamingReply = streamingChatReply,
-                                        chatError = chatError,
-                                        injectedChatDraft = pendingChatDraftInjection,
-                                        liveVoiceState = liveVoiceState,
-                                        searchGroundingState = searchGroundingState,
-                                        savedResearchNotes = savedResearchNotes,
-                                        onConsumeInjectedChatDraft = viewModel::consumeInjectedChatDraft,
-                                        onSendRevision = viewModel::sendChatRevision,
-                                        onAcceptProposal = viewModel::acceptChatProposal,
-                                        onDiscardProposal = viewModel::discardChatProposal,
-                                        onRetryLastChat = viewModel::retryLastChatMessage,
-                                        onDismissChatError = viewModel::dismissChatError,
-                                        onSwitchToFastModel = viewModel::switchToFastLiteModel,
+                                    DiscussionRoute(
+                                        viewModel = viewModel,
                                         onOpenSettings = { showSettingsSheet = true },
                                         onLaunchChatAudioTranscribe = {
                                             transcribeTarget = TranscribeTarget.DISCUSSION_INPUT
@@ -754,19 +712,9 @@ private fun RedatDagnaApp(
                                                 viewModel.startLiveVoiceConversation()
                                             }
                                         },
-                                        onStopLiveVoice = viewModel::stopLiveVoiceConversation,
-                                        onSendCaseContextToLive = viewModel::sendActiveCaseContextToLive,
-                                        onSaveLiveTranscriptNote = { combined ->
-                                            viewModel.saveVoiceOrTranscriptNoteToCloud(
-                                                noteType = ResearchNoteType.LIVE_VOICE,
-                                                title = "ቀጥታ የድምጽ ውይይት (${activeCase.caseNumber.ifBlank { "አጠቃላይ" }})",
-                                                content = combined,
-                                            )
+                                        headerVisibleFractionProvider = {
+                                            (1f - scrollBehavior.state.collapsedFraction).coerceIn(0f, 1f)
                                         },
-                                        onRunGroundedSearch = viewModel::runGroundedLegalSearch,
-                                        onSaveSearchNote = viewModel::saveGroundedSearchToCloud,
-                                        onDeleteSavedNote = viewModel::deleteCloudResearchNote,
-                                        headerVisibleFraction = visibleTopFraction,
                                         onExpandTopChrome = { topBarState.heightOffset = 0f },
                                     )
                                 }
@@ -774,24 +722,13 @@ private fun RedatDagnaApp(
                         }
 
                         MainMenuTab.ARCHIVES -> {
-                            ArchivesScreen(
-                                isUnlocked = isArchivesUnlocked,
-                                hasPinSet = settings.hasPinSet,
-                                biometricEnabled = settings.biometricEnabled,
-                                searchQuery = searchQuery,
-                                ratingFilter = ratingFilter,
-                                typeFilter = typeFilter,
-                                pagedCases = pagedArchives,
-                                importState = archiveImportState,
+                            ArchivesRoute(
+                                viewModel = viewModel,
+                                settings = settings,
                                 onUnlockBiometric = {
                                     requestUnlockWithBiometricOrPin { viewModel.unlockArchives() }
                                 },
                                 onUnlockWithPin = { showPinPromptForUnlock = true },
-                                onUnlockWithoutCredentials = { viewModel.unlockArchives() },
-                                onSearchChange = viewModel::setArchiveSearch,
-                                onRatingFilterChange = viewModel::setArchiveRatingFilter,
-                                onTypeFilterChange = viewModel::setArchiveTypeFilter,
-                                onOpenCase = viewModel::openExistingCase,
                                 onExportPdf = { c ->
                                     viewModel.dismissLatestPdfResult()
                                     viewModel.dismissLatestDocxResult()
@@ -822,19 +759,6 @@ private fun RedatDagnaApp(
                                         PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
                                     )
                                 },
-                                onCancelImport = viewModel::cancelArchiveImport,
-                                onDismissImportStatus = viewModel::dismissArchiveImportStatus,
-                                settingsPinnedKeys = settings.pinnedStyleKeys,
-                                settingsSubjectTags = settings.subjectTags,
-                                settingsAdjournmentDates = settings.adjournmentDates,
-                                pinnedOnlyFilter = archivePinnedOnly,
-                                subjectFilter = archiveSubjectFilter,
-                                onPinnedOnlyFilterChange = viewModel::setArchivePinnedOnly,
-                                onSubjectFilterChange = viewModel::setArchiveSubjectFilter,
-                                onTogglePin = viewModel::togglePinStyleCase,
-                                onSetSubjectTag = { c, tag -> viewModel.setCaseSubjectTag(c, tag) },
-                                onRenameCase = viewModel::renameArchivedCase,
-                                onDeleteCase = viewModel::deleteArchivedCase,
                                 onExpandTopChrome = { topBarState.heightOffset = 0f },
                             )
                         }
@@ -846,6 +770,8 @@ private fun RedatDagnaApp(
 
     // Audio Transcription Sheet (gemini-3.5-transcribe)
     if (showAudioTranscribeSheet) {
+        val audioTranscribeState by viewModel.audioTranscribeState.collectAsStateWithLifecycle()
+        val activeCaseNumber = viewModel.activeCase.collectAsStateWithLifecycle().value.caseNumber
         AudioTranscribeSheet(
             state = audioTranscribeState,
             target = transcribeTarget,
@@ -878,7 +804,7 @@ private fun RedatDagnaApp(
             onSaveToCloudNotes = { text ->
                 viewModel.saveVoiceOrTranscriptNoteToCloud(
                     noteType = ResearchNoteType.TRANSCRIPT,
-                    title = "የድምጽ ቅጂ ጽሁፍ (${activeCase.caseNumber.ifBlank { "ማስታወሻ" }})",
+                    title = "የድምጽ ቅጂ ጽሁፍ (${activeCaseNumber.ifBlank { "ማስታወሻ" }})",
                     content = text,
                 )
             },
@@ -920,17 +846,38 @@ private fun RedatDagnaApp(
         SettingsAndKeySheet(
             settings = settings,
             currentApiKeyMask = masked,
+            hasNotificationPermission = hasNotificationPermission,
             onDismiss = { showSettingsSheet = false },
             onSaveApiKey = { viewModel.prefs.setCustomApiKey(it) },
             onSaveModels = { ocr, draft -> viewModel.prefs.setModels(ocr, draft) },
             onToggleFlagSecure = { viewModel.prefs.setFlagSecure(it) },
             onTogglePiiMasking = { viewModel.prefs.setPiiMasking(it) },
+            onToggleNotifications = { enabled ->
+                viewModel.toggleNotifications(enabled)
+                if (enabled && !hasNotificationPermission) {
+                    requestNotificationPermissionIfNeeded(sendTestAfter = false)
+                }
+            },
+            onRequestNotificationPermission = {
+                requestNotificationPermissionIfNeeded(sendTestAfter = true)
+            },
+            onSendTestNotification = {
+                if (!hasNotificationPermission) {
+                    requestNotificationPermissionIfNeeded(sendTestAfter = true)
+                } else {
+                    viewModel.sendTestNotification()
+                }
+            },
             onAutoLockChange = { viewModel.prefs.setAutoLockMinutes(it) },
             onThemeOverrideChange = { viewModel.prefs.setDarkThemeOverride(it) },
         )
     }
 
     if (showDriveSyncSheet) {
+        val pendingSyncCount by viewModel.pendingSyncCount.collectAsStateWithLifecycle()
+        val isDriveBusy by viewModel.isDriveBusy.collectAsStateWithLifecycle()
+        val driveError by viewModel.driveError.collectAsStateWithLifecycle()
+        val driveBackups by viewModel.driveBackups.collectAsStateWithLifecycle()
         DriveSyncSheet(
             settings = settings,
             pendingSyncCount = pendingSyncCount,
@@ -959,6 +906,7 @@ private fun RedatDagnaApp(
     }
 
     if (showSecuritySheet) {
+        val isArchivesUnlocked by viewModel.isArchivesUnlocked.collectAsStateWithLifecycle()
         ArchiveSecuritySheet(
             settings = settings,
             isArchivesUnlocked = isArchivesUnlocked,
@@ -978,6 +926,7 @@ private fun RedatDagnaApp(
     }
 
     if (showDatePicker) {
+        val activeCase by viewModel.activeCase.collectAsStateWithLifecycle()
         EthiopianDatePickerDialog(
             initialDate = activeCase.ethiopianDate,
             onDismiss = { showDatePicker = false },
@@ -999,6 +948,7 @@ private fun RedatDagnaApp(
     }
 
     if (showVersionHistory) {
+        val versions by viewModel.activeCaseVersions.collectAsStateWithLifecycle()
         VersionHistorySheet(
             versions = versions,
             onDismiss = { showVersionHistory = false },
@@ -1010,6 +960,10 @@ private fun RedatDagnaApp(
     }
 
     pdfDialogCase?.let { targetCase ->
+        val latestPdfResult by viewModel.latestPdfResult.collectAsStateWithLifecycle()
+        val isPdfGenerating by viewModel.isPdfGenerating.collectAsStateWithLifecycle()
+        val latestDocxResult by viewModel.latestDocxResult.collectAsStateWithLifecycle()
+        val isDocxGenerating by viewModel.isDocxGenerating.collectAsStateWithLifecycle()
         PdfExportOptionsDialog(
             caseNumber = targetCase.caseNumber,
             isGenerating = isPdfGenerating,
@@ -1052,6 +1006,7 @@ private fun RedatDagnaApp(
     }
 
     if (showFullScreenEditor) {
+        val activeCase by viewModel.activeCase.collectAsStateWithLifecycle()
         FullScreenDocumentEditorDialog(
             caseNumber = activeCase.caseNumber,
             initialText = JudicialDocumentFormatter.composeUnifiedDocument(activeCase),
@@ -1081,6 +1036,7 @@ private fun RedatDagnaApp(
     }
 
     if (showAdjournmentDatePicker) {
+        val activeCase by viewModel.activeCase.collectAsStateWithLifecycle()
         val currentAdj = PastJudgmentParser.resolveMapValue(settings.adjournmentDates, activeCase)
         EthiopianDatePickerDialog(
             initialDate = currentAdj ?: activeCase.ethiopianDate,
@@ -1088,16 +1044,15 @@ private fun RedatDagnaApp(
             onConfirm = { et, _ ->
                 viewModel.setCaseAdjournmentDate(activeCase, et)
                 showAdjournmentDatePicker = false
+                if (settings.notificationsEnabled && !hasNotificationPermission && !promptedNotificationOnAdjournment) {
+                    promptedNotificationOnAdjournment = true
+                    requestNotificationPermissionIfNeeded(sendTestAfter = false)
+                }
             },
         )
     }
 
-    pdfVerificationResult?.let { vResult ->
-        PdfVerificationDialog(
-            result = vResult,
-            onDismiss = viewModel::dismissVerificationResult,
-        )
-    }
+    PdfVerificationHost(viewModel = viewModel)
 
     if (showPinPromptForUnlock) {
         PinPromptDialog(
@@ -1120,3 +1075,304 @@ private fun RedatDagnaApp(
         )
     }
 }
+
+@Composable
+private fun RedatTopBarActions(
+    viewModel: JudicialViewModel,
+    settings: AppSecuritySettings,
+    onOpenLawReference: () -> Unit,
+    onOpenSettings: () -> Unit,
+    onOpenDriveSync: () -> Unit,
+    onOpenSecurity: () -> Unit,
+    onOpenSignOut: () -> Unit,
+) {
+    val pendingSyncCount by viewModel.pendingSyncCount.collectAsStateWithLifecycle()
+    val isArchivesUnlocked by viewModel.isArchivesUnlocked.collectAsStateWithLifecycle()
+
+    IconButton(
+        onClick = onOpenLawReference,
+        modifier = Modifier.testTag("top_law_reference_button"),
+    ) {
+        Icon(
+            Icons.AutoMirrored.Filled.MenuBook,
+            contentDescription = stringResource(R.string.cd_law_reference),
+        )
+    }
+    IconButton(
+        onClick = onOpenSettings,
+        modifier = Modifier.testTag("top_key_button"),
+    ) {
+        Icon(
+            Icons.Default.Key,
+            contentDescription = stringResource(R.string.cd_api_key_settings),
+        )
+    }
+    IconButton(
+        onClick = onOpenDriveSync,
+        modifier = Modifier.testTag("top_cloud_button"),
+    ) {
+        BadgedBox(
+            badge = {
+                if (pendingSyncCount > 0) {
+                    Badge { Text(pendingSyncCount.toString()) }
+                }
+            }
+        ) {
+            Icon(
+                if (settings.driveApiAuthorized && !settings.googleAccountEmail.isNullOrBlank()) {
+                    Icons.Default.CloudDone
+                } else {
+                    Icons.Default.CloudSync
+                },
+                contentDescription = stringResource(R.string.cd_drive_sync),
+                tint = if (settings.driveApiAuthorized && !settings.googleAccountEmail.isNullOrBlank()) {
+                    com.example.ui.theme.VerifiedEmerald
+                } else {
+                    MaterialTheme.colorScheme.onSurface
+                },
+            )
+        }
+    }
+    IconButton(
+        onClick = onOpenSecurity,
+        modifier = Modifier.testTag("top_lock_button"),
+    ) {
+        Icon(
+            if (isArchivesUnlocked) Icons.Default.LockOpen else Icons.Default.Lock,
+            contentDescription = stringResource(R.string.cd_archive_lock),
+        )
+    }
+    IconButton(
+        onClick = onOpenSignOut,
+        modifier = Modifier.testTag("top_sign_out_button"),
+    ) {
+        Icon(
+            Icons.AutoMirrored.Filled.Logout,
+            contentDescription = "ከGoogle መለያ ውጣ",
+        )
+    }
+}
+
+@Composable
+private fun ArchivesNavIconWithBadge(viewModel: JudicialViewModel) {
+    val archivedCount by viewModel.archivedCount.collectAsStateWithLifecycle()
+    BadgedBox(
+        badge = {
+            if (archivedCount > 0) Badge { Text(archivedCount.toString()) }
+        }
+    ) {
+        Icon(Icons.Default.FolderSpecial, contentDescription = null)
+    }
+}
+
+@Composable
+private fun ArchivesRailLabel(viewModel: JudicialViewModel) {
+    val archivedCount by viewModel.archivedCount.collectAsStateWithLifecycle()
+    Text("${stringResource(R.string.tab_archives)} ($archivedCount)")
+}
+
+@Composable
+private fun PdfVerificationHost(viewModel: JudicialViewModel) {
+    val pdfVerificationResult by viewModel.pdfVerificationResult.collectAsStateWithLifecycle()
+    pdfVerificationResult?.let { vResult ->
+        PdfVerificationDialog(
+            result = vResult,
+            onDismiss = viewModel::dismissVerificationResult,
+        )
+    }
+}
+
+@Composable
+private fun DraftBuilderRoute(
+    viewModel: JudicialViewModel,
+    settings: AppSecuritySettings,
+    onOpenDatePicker: () -> Unit,
+    onPickPhotos: (AttachmentTarget) -> Unit,
+    onPickDocuments: (AttachmentTarget) -> Unit,
+    onCaptureCamera: (AttachmentTarget) -> Unit,
+    onLaunchVoiceInstructions: () -> Unit,
+    onOpenVersionHistory: () -> Unit,
+    onOpenBadRatingDialog: () -> Unit,
+    onOpenPdfExport: (CaseEntity) -> Unit,
+    onOpenSettings: () -> Unit,
+    onOpenAdjournmentPicker: () -> Unit,
+    onAfterAdjournmentScheduled: () -> Unit,
+    onOpenFullScreenEditor: () -> Unit,
+    onOpenLawReference: () -> Unit,
+    onExpandTopChrome: () -> Unit,
+) {
+    val activeCase by viewModel.activeCase.collectAsStateWithLifecycle()
+    val recentWorkCases by viewModel.allWorkCases.collectAsStateWithLifecycle()
+    val plaintiffAttachments by viewModel.plaintiffAttachments.collectAsStateWithLifecycle()
+    val defendantAttachments by viewModel.defendantAttachments.collectAsStateWithLifecycle()
+    val judgeInstructionAttachments by viewModel.judgeInstructionAttachments.collectAsStateWithLifecycle()
+    val pipelineState by viewModel.pipelineState.collectAsStateWithLifecycle()
+
+    DraftBuilderScreen(
+        activeCase = activeCase,
+        recentWorkCases = recentWorkCases,
+        plaintiffAttachments = plaintiffAttachments,
+        defendantAttachments = defendantAttachments,
+        judgeInstructionAttachments = judgeInstructionAttachments,
+        pipelineState = pipelineState,
+        onStartNewCase = viewModel::startNewCase,
+        onSelectRecentCase = viewModel::openExistingCase,
+        onCaseTypeChange = viewModel::updateCaseType,
+        onMetadataChange = viewModel::updateActiveCaseMetadata,
+        onOpenDatePicker = onOpenDatePicker,
+        onPickPhotos = onPickPhotos,
+        onPickDocuments = onPickDocuments,
+        onCaptureCamera = onCaptureCamera,
+        onRemoveAttachment = viewModel::removeAttachment,
+        onExtractJudgeInstructionAttachments = viewModel::extractJudgeInstructionAttachmentsToText,
+        onLaunchVoiceInstructions = onLaunchVoiceInstructions,
+        onStartOcr = viewModel::startStage1Ocr,
+        onUpdateOcrTexts = viewModel::updateOcrReviewTexts,
+        onConfirmOcrAndDraft = viewModel::confirmOcrAndGenerateDraft,
+        onCancelPipeline = viewModel::cancelAiJob,
+        onUpdateUnifiedDocument = viewModel::updateUnifiedDocumentManually,
+        onSaveManualVersion = viewModel::saveManualVersionSnapshot,
+        onOpenVersionHistory = onOpenVersionHistory,
+        onRateGoodOrExcellent = { rating -> viewModel.rateDraft(rating) },
+        onOpenBadRatingDialog = onOpenBadRatingDialog,
+        onFinalizeToArchive = viewModel::finalizeToArchive,
+        onOpenPdfExport = { onOpenPdfExport(activeCase) },
+        onOpenSettings = onOpenSettings,
+        activeSubjectTag = PastJudgmentParser.resolveMapValue(settings.subjectTags, activeCase),
+        activeAdjournmentDate = PastJudgmentParser.resolveMapValue(settings.adjournmentDates, activeCase),
+        onAutoFillFromOcr = { viewModel.autoFillMetadataFromOcr(overwriteExisting = true) },
+        onApplyPreset = viewModel::applyJudicialPreset,
+        onSelectSubjectTag = { tag -> viewModel.setCaseSubjectTag(activeCase, tag) },
+        onOpenAdjournmentPicker = onOpenAdjournmentPicker,
+        onQuickAdjournmentDays = { days ->
+            val (etNext, _) = EthiopianCalendarUtil.addDaysToEthiopian(activeCase.ethiopianDate, days)
+            viewModel.setCaseAdjournmentDate(activeCase, etNext)
+            onAfterAdjournmentScheduled()
+        },
+        onClearAdjournment = { viewModel.setCaseAdjournmentDate(activeCase, null) },
+        onOpenFullScreenEditor = onOpenFullScreenEditor,
+        onOpenLawReference = onOpenLawReference,
+        onTransferToDiscussion = { viewModel.transferDraftToDiscussion() },
+        onExpandTopChrome = onExpandTopChrome,
+    )
+}
+
+@Composable
+private fun DiscussionRoute(
+    viewModel: JudicialViewModel,
+    onOpenSettings: () -> Unit,
+    onLaunchChatAudioTranscribe: () -> Unit,
+    onStartLiveVoice: () -> Unit,
+    headerVisibleFractionProvider: () -> Float,
+    onExpandTopChrome: () -> Unit,
+) {
+    val activeCase by viewModel.activeCase.collectAsStateWithLifecycle()
+    val chatMessages by viewModel.activeChatMessages.collectAsStateWithLifecycle()
+    val isChatSending by viewModel.isChatSending.collectAsStateWithLifecycle()
+    val streamingChatReply by viewModel.streamingChatReply.collectAsStateWithLifecycle()
+    val chatError by viewModel.chatError.collectAsStateWithLifecycle()
+    val pendingChatDraftInjection by viewModel.pendingChatDraftInjection.collectAsStateWithLifecycle()
+    val liveVoiceState by viewModel.liveVoiceState.collectAsStateWithLifecycle()
+    val searchGroundingState by viewModel.searchGroundingState.collectAsStateWithLifecycle()
+    val savedResearchNotes by viewModel.savedResearchNotes.collectAsStateWithLifecycle()
+    val discussionTransferEvent by viewModel.discussionTransferEvent.collectAsStateWithLifecycle()
+
+    DiscussionScreen(
+        activeCase = activeCase,
+        messages = chatMessages,
+        isSending = isChatSending,
+        streamingReply = streamingChatReply,
+        chatError = chatError,
+        injectedChatDraft = pendingChatDraftInjection,
+        liveVoiceState = liveVoiceState,
+        searchGroundingState = searchGroundingState,
+        savedResearchNotes = savedResearchNotes,
+        onConsumeInjectedChatDraft = viewModel::consumeInjectedChatDraft,
+        onSendRevision = viewModel::sendChatRevision,
+        onAcceptProposal = viewModel::acceptChatProposal,
+        onDiscardProposal = viewModel::discardChatProposal,
+        onRetryLastChat = viewModel::retryLastChatMessage,
+        onDismissChatError = viewModel::dismissChatError,
+        onSwitchToFastModel = viewModel::switchToFastLiteModel,
+        onOpenSettings = onOpenSettings,
+        onLaunchChatAudioTranscribe = onLaunchChatAudioTranscribe,
+        onStartLiveVoice = onStartLiveVoice,
+        onStopLiveVoice = viewModel::stopLiveVoiceConversation,
+        onSendCaseContextToLive = viewModel::sendActiveCaseContextToLive,
+        onSaveLiveTranscriptNote = { combined ->
+            viewModel.saveVoiceOrTranscriptNoteToCloud(
+                noteType = ResearchNoteType.LIVE_VOICE,
+                title = "ቀጥታ የድምጽ ውይይት (${activeCase.caseNumber.ifBlank { "አጠቃላይ" }})",
+                content = combined,
+            )
+        },
+        onRunGroundedSearch = viewModel::runGroundedLegalSearch,
+        onSaveSearchNote = viewModel::saveGroundedSearchToCloud,
+        onDeleteSavedNote = viewModel::deleteCloudResearchNote,
+        transferEventToken = discussionTransferEvent,
+        onBackToDraft = viewModel::returnToDraftBuilder,
+        headerVisibleFractionProvider = headerVisibleFractionProvider,
+        onExpandTopChrome = onExpandTopChrome,
+    )
+}
+
+@Composable
+private fun ArchivesRoute(
+    viewModel: JudicialViewModel,
+    settings: AppSecuritySettings,
+    onUnlockBiometric: () -> Unit,
+    onUnlockWithPin: () -> Unit,
+    onExportPdf: (CaseEntity) -> Unit,
+    onReopenForRevision: (CaseEntity) -> Unit,
+    onVerifyPdfClick: () -> Unit,
+    onUploadReferenceFiles: () -> Unit,
+    onUploadReferencePhotos: () -> Unit,
+    onExpandTopChrome: () -> Unit,
+) {
+    val isArchivesUnlocked by viewModel.isArchivesUnlocked.collectAsStateWithLifecycle()
+    val searchQuery by viewModel.archiveSearchQuery.collectAsStateWithLifecycle()
+    val ratingFilter by viewModel.archiveRatingFilter.collectAsStateWithLifecycle()
+    val typeFilter by viewModel.archiveTypeFilter.collectAsStateWithLifecycle()
+    val pagedArchives = viewModel.archivedPagedCases.collectAsLazyPagingItems()
+    val archiveImportState by viewModel.archiveImportState.collectAsStateWithLifecycle()
+    val archivePinnedOnly by viewModel.archivePinnedOnly.collectAsStateWithLifecycle()
+    val archiveSubjectFilter by viewModel.archiveSubjectFilter.collectAsStateWithLifecycle()
+
+    ArchivesScreen(
+        isUnlocked = isArchivesUnlocked,
+        hasPinSet = settings.hasPinSet,
+        biometricEnabled = settings.biometricEnabled,
+        searchQuery = searchQuery,
+        ratingFilter = ratingFilter,
+        typeFilter = typeFilter,
+        pagedCases = pagedArchives,
+        importState = archiveImportState,
+        onUnlockBiometric = onUnlockBiometric,
+        onUnlockWithPin = onUnlockWithPin,
+        onUnlockWithoutCredentials = { viewModel.unlockArchives() },
+        onSearchChange = viewModel::setArchiveSearch,
+        onRatingFilterChange = viewModel::setArchiveRatingFilter,
+        onTypeFilterChange = viewModel::setArchiveTypeFilter,
+        onOpenCase = viewModel::openExistingCase,
+        onExportPdf = onExportPdf,
+        onReopenForRevision = onReopenForRevision,
+        onVerifyPdfClick = onVerifyPdfClick,
+        onUploadReferenceFiles = onUploadReferenceFiles,
+        onUploadReferencePhotos = onUploadReferencePhotos,
+        onCancelImport = viewModel::cancelArchiveImport,
+        onDismissImportStatus = viewModel::dismissArchiveImportStatus,
+        settingsPinnedKeys = settings.pinnedStyleKeys,
+        settingsSubjectTags = settings.subjectTags,
+        settingsAdjournmentDates = settings.adjournmentDates,
+        pinnedOnlyFilter = archivePinnedOnly,
+        subjectFilter = archiveSubjectFilter,
+        onPinnedOnlyFilterChange = viewModel::setArchivePinnedOnly,
+        onSubjectFilterChange = viewModel::setArchiveSubjectFilter,
+        onTogglePin = viewModel::togglePinStyleCase,
+        onSetSubjectTag = { c, tag -> viewModel.setCaseSubjectTag(c, tag) },
+        onRenameCase = viewModel::renameArchivedCase,
+        onDeleteCase = viewModel::deleteArchivedCase,
+        onExpandTopChrome = onExpandTopChrome,
+    )
+}
+

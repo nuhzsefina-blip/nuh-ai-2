@@ -1,5 +1,6 @@
 package com.example.ai
 
+import android.content.Context
 import android.util.Base64
 import android.util.Log
 import com.example.data.local.CaseEntity
@@ -8,6 +9,7 @@ import com.example.data.repository.CaseRepository
 import com.example.security.PiiMasker
 import com.example.security.SecurePrefsManager
 import com.example.util.DocumentAttachment
+import com.example.util.NetworkUtils
 import com.example.util.ProcessedPageImage
 import com.google.firebase.Firebase
 import com.google.firebase.ai.GenerativeModel
@@ -41,13 +43,15 @@ import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.BufferedReader
+import java.io.EOFException
 import java.io.InputStreamReader
 import java.net.ConnectException
+import java.net.SocketException
 import java.net.SocketTimeoutException
 import java.net.UnknownHostException
 import java.util.concurrent.ConcurrentHashMap
-import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
+import javax.net.ssl.SSLException
 
 data class ParsedDraftSections(
     val issues: String,
@@ -93,21 +97,25 @@ private const val MODEL_LITE = "gemini-3.5-flash-lite"
 private const val MODEL_FLASH = "gemini-3.8-flash"
 private const val MODEL_PRO = "gemini-4-argon"
 private const val OCR_BATCH_SIZE = 3
+private const val CELLULAR_OCR_BATCH_SIZE = 2
 
 class GeminiJudicialService(
     private val prefs: SecurePrefsManager,
     private val repository: CaseRepository,
+    private val appContext: Context? = null,
 ) {
     private val httpClient: OkHttpClient by lazy {
-        OkHttpClient.Builder()
-            .connectTimeout(25, TimeUnit.SECONDS)
-            .readTimeout(90, TimeUnit.SECONDS)
-            .writeTimeout(60, TimeUnit.SECONDS)
-            .build()
+        NetworkUtils.createMobileResilientOkHttpClient(
+            connectTimeoutSec = 35L,
+            readTimeoutSec = 120L,
+            writeTimeoutSec = 90L,
+            callTimeoutSec = 180L,
+        )
     }
 
-    // Shared across plaintiff & defendant OCR so concurrent uploads stay bounded to 2 at a time
+    // Shared across plaintiff & defendant OCR so concurrent uploads stay bounded to 2 on Wi-Fi, 1 on Mobile Data
     private val ocrSemaphore = Semaphore(2)
+    private val cellularOcrSemaphore = Semaphore(1)
 
     // Lazy cache of Firebase GenerativeModel instances to reuse underlying APIController & HTTP pools
     private val modelCache = ConcurrentHashMap<String, GenerativeModel>()
@@ -205,11 +213,15 @@ class GeminiJudicialService(
         val totalUncached = uncachedPages.size
         val completedCounter = AtomicInteger(0)
 
-        val batches = uncachedPages.chunked(OCR_BATCH_SIZE)
+        val isCellular = appContext?.let { NetworkUtils.isCellularConnection(it) } == true
+        val effectiveBatchSize = if (isCellular) CELLULAR_OCR_BATCH_SIZE else OCR_BATCH_SIZE
+        val activeSemaphore = if (isCellular) cellularOcrSemaphore else ocrSemaphore
+
+        val batches = uncachedPages.chunked(effectiveBatchSize)
         val batchJobs = batches.mapIndexed { batchIndex, batch ->
             async(Dispatchers.IO) {
-                ocrSemaphore.withPermit {
-                    val rangeStart = batchIndex * OCR_BATCH_SIZE + 1
+                activeSemaphore.withPermit {
+                    val rangeStart = batchIndex * effectiveBatchSize + 1
                     val rangeEnd = rangeStart + batch.size - 1
                     val rangeText = if (rangeStart == rangeEnd) "$rangeStart" else "$rangeStart–$rangeEnd"
                     onProgress?.invoke("$sideLabel: ገጽ $rangeText ከ$totalUncached በመነበብ ላይ...")
@@ -268,7 +280,7 @@ class GeminiJudicialService(
             pageLabels = batch.map { it.label },
         )
         val raw = runCatching {
-            withTimeout(60_000L) {
+            withTimeout(120_000L) {
                 executeVisionWithQuotaFallback(
                     preferredModel = preferredModel,
                     customApiKey = customApiKey,
@@ -323,7 +335,7 @@ class GeminiJudicialService(
     ): String {
         val pageStart = System.currentTimeMillis()
         val prompt = JudicialPrompts.buildOcrPrompt(sideLabel)
-        val text = withTimeout(60_000L) {
+        val text = withTimeout(120_000L) {
             executeVisionWithQuotaFallback(
                 preferredModel = preferredModel,
                 customApiKey = customApiKey,
@@ -369,8 +381,8 @@ class GeminiJudicialService(
         prompt: String,
         pages: List<ProcessedPageImage>,
         labels: List<String>,
-    ): String {
-        return if (!customApiKey.isNullOrBlank()) {
+    ): String = NetworkUtils.withMobileDataRetry(maxAttempts = 2, initialDelayMs = 700L) {
+        if (!customApiKey.isNullOrBlank()) {
             callRestVisionPages(
                 apiKey = customApiKey,
                 modelName = modelName,
@@ -448,7 +460,8 @@ class GeminiJudicialService(
         val rawBuffer = StringBuilder()
 
         suspend fun streamWithModel(targetModel: String) {
-            withTimeout(90_000L) {
+            var lastTokenEmitMs = 0L
+            withTimeout(150_000L) {
                 if (!customApiKey.isNullOrBlank()) {
                     streamRestText(
                         apiKey = customApiKey,
@@ -457,8 +470,12 @@ class GeminiJudicialService(
                         userPrompt = prompt,
                     ).collect { delta ->
                         rawBuffer.append(delta)
-                        val unmasked = PiiMasker.unmask(rawBuffer.toString(), unmaskMap)
-                        emit(StreamEvent.Token(unmasked, parseSections(unmasked)))
+                        val now = System.currentTimeMillis()
+                        if (now - lastTokenEmitMs >= 90L) {
+                            lastTokenEmitMs = now
+                            val unmasked = PiiMasker.unmask(rawBuffer.toString(), unmaskMap)
+                            emit(StreamEvent.Token(unmasked, parseSections(unmasked)))
+                        }
                     }
                 } else {
                     val model = getOrCreateModel(
@@ -469,8 +486,12 @@ class GeminiJudicialService(
                         val delta = chunk.text.orEmpty()
                         if (delta.isNotEmpty()) {
                             rawBuffer.append(delta)
-                            val unmasked = PiiMasker.unmask(rawBuffer.toString(), unmaskMap)
-                            emit(StreamEvent.Token(unmasked, parseSections(unmasked)))
+                            val now = System.currentTimeMillis()
+                            if (now - lastTokenEmitMs >= 90L) {
+                                lastTokenEmitMs = now
+                                val unmasked = PiiMasker.unmask(rawBuffer.toString(), unmaskMap)
+                                emit(StreamEvent.Token(unmasked, parseSections(unmasked)))
+                            }
                         }
                     }
                 }
@@ -478,7 +499,18 @@ class GeminiJudicialService(
         }
 
         try {
-            streamWithModel(draftingModel)
+            try {
+                streamWithModel(draftingModel)
+            } catch (e: Throwable) {
+                if (e is CancellationException && e !is TimeoutCancellationException) throw e
+                if (rawBuffer.isEmpty() && NetworkUtils.isTransientNetworkFailure(e)) {
+                    Log.w(TAG, "Transient mobile/network error before first draft token; retrying once", e)
+                    kotlinx.coroutines.delay(750L)
+                    streamWithModel(draftingModel)
+                } else {
+                    throw e
+                }
+            }
         } catch (e: Throwable) {
             if (e is CancellationException && e !is TimeoutCancellationException) throw e
             val fallback = fallbackModelFor(draftingModel)
@@ -518,7 +550,8 @@ class GeminiJudicialService(
         val buffer = StringBuilder()
 
         suspend fun streamChat(modelName: String) {
-            withTimeout(60_000L) {
+            var lastDeltaEmitMs = 0L
+            withTimeout(90_000L) {
                 if (!customApiKey.isNullOrBlank()) {
                     streamRestText(
                         apiKey = customApiKey,
@@ -527,7 +560,11 @@ class GeminiJudicialService(
                         userPrompt = prompt,
                     ).collect { delta ->
                         buffer.append(delta)
-                        emit(ChatStreamEvent.Delta(buffer.toString()))
+                        val now = System.currentTimeMillis()
+                        if (now - lastDeltaEmitMs >= 70L) {
+                            lastDeltaEmitMs = now
+                            emit(ChatStreamEvent.Delta(buffer.toString()))
+                        }
                     }
                 } else {
                     val model = getOrCreateModel(
@@ -538,7 +575,11 @@ class GeminiJudicialService(
                         val delta = chunk.text.orEmpty()
                         if (delta.isNotEmpty()) {
                             buffer.append(delta)
-                            emit(ChatStreamEvent.Delta(buffer.toString()))
+                            val now = System.currentTimeMillis()
+                            if (now - lastDeltaEmitMs >= 70L) {
+                                lastDeltaEmitMs = now
+                                emit(ChatStreamEvent.Delta(buffer.toString()))
+                            }
                         }
                     }
                 }
@@ -547,7 +588,18 @@ class GeminiJudicialService(
 
         var usedModel = MODEL_LITE
         try {
-            streamChat(MODEL_LITE)
+            try {
+                streamChat(MODEL_LITE)
+            } catch (e: Throwable) {
+                if (e is CancellationException && e !is TimeoutCancellationException) throw e
+                if (buffer.isEmpty() && NetworkUtils.isTransientNetworkFailure(e)) {
+                    Log.w(TAG, "Transient mobile/network error on chat; retrying once", e)
+                    kotlinx.coroutines.delay(650L)
+                    streamChat(MODEL_LITE)
+                } else {
+                    throw e
+                }
+            }
         } catch (e: Throwable) {
             if (e is CancellationException && e !is TimeoutCancellationException) throw e
             if (buffer.isEmpty() && (isQuotaExceededError(e) || e is TimeoutCancellationException)) {
@@ -589,30 +641,35 @@ class GeminiJudicialService(
             similarReferences = similarReferences,
         )
 
-        suspend fun requestRevision(modelName: String): String = withTimeout(60_000L) {
-            if (!customApiKey.isNullOrBlank()) {
-                callRestStructuredJson(
-                    apiKey = customApiKey,
-                    modelName = modelName,
-                    systemInstruction = JudicialPrompts.SYSTEM_INSTRUCTION,
-                    userPrompt = prompt,
-                )
-            } else {
-                val revisionSchema = Schema.obj(
-                    properties = mapOf(
-                        "revisedText" to Schema.string("The updated Amharic legal text for ONLY the requested section"),
-                        "explanation" to Schema.string("Brief Amharic explanation of what was changed"),
-                        "consistencyWarning" to Schema.string("Any legal consistency note across issues/analysis/decision, or empty string if consistent"),
-                    ),
-                )
-                val model = getOrCreateModel(
-                    modelName = modelName,
-                    systemInstructionText = JudicialPrompts.SYSTEM_INSTRUCTION,
-                    responseSchema = revisionSchema,
-                    responseMimeType = "application/json",
-                )
-                model.generateContent(prompt).text
-                    ?: throw IllegalStateException("AI ባዶ ምላሽ መልሷል።")
+        suspend fun requestRevision(modelName: String): String = NetworkUtils.withMobileDataRetry(
+            maxAttempts = 2,
+            initialDelayMs = 650L,
+        ) {
+            withTimeout(90_000L) {
+                if (!customApiKey.isNullOrBlank()) {
+                    callRestStructuredJson(
+                        apiKey = customApiKey,
+                        modelName = modelName,
+                        systemInstruction = JudicialPrompts.SYSTEM_INSTRUCTION,
+                        userPrompt = prompt,
+                    )
+                } else {
+                    val revisionSchema = Schema.obj(
+                        properties = mapOf(
+                            "revisedText" to Schema.string("The updated Amharic legal text for ONLY the requested section"),
+                            "explanation" to Schema.string("Brief Amharic explanation of what was changed"),
+                            "consistencyWarning" to Schema.string("Any legal consistency note across issues/analysis/decision, or empty string if consistent"),
+                        ),
+                    )
+                    val model = getOrCreateModel(
+                        modelName = modelName,
+                        systemInstructionText = JudicialPrompts.SYSTEM_INSTRUCTION,
+                        responseSchema = revisionSchema,
+                        responseMimeType = "application/json",
+                    )
+                    model.generateContent(prompt).text
+                        ?: throw IllegalStateException("AI ባዶ ምላሽ መልሷል።")
+                }
             }
         }
 
@@ -651,12 +708,14 @@ class GeminiJudicialService(
         val customApiKey = prefs.getCustomApiKey()
         val ocrModel = settings.ocrModelName.ifBlank { MODEL_LITE }
         val prompt = JudicialPrompts.buildChatSummaryPrompt(messagesText)
-        withTimeout(30_000L) {
-            if (!customApiKey.isNullOrBlank()) {
-                callRestText(customApiKey, ocrModel, prompt)
-            } else {
-                val model = getOrCreateModel(modelName = ocrModel)
-                model.generateContent(prompt).text.orEmpty()
+        NetworkUtils.withMobileDataRetry(maxAttempts = 2, initialDelayMs = 600L) {
+            withTimeout(45_000L) {
+                if (!customApiKey.isNullOrBlank()) {
+                    callRestText(customApiKey, ocrModel, prompt)
+                } else {
+                    val model = getOrCreateModel(modelName = ocrModel)
+                    model.generateContent(prompt).text.orEmpty()
+                }
             }
         }
     }
@@ -879,9 +938,13 @@ class GeminiJudicialService(
         )
 
         private val REVISION_KEYWORDS = listOf(
-            "አሻሽል", "ቀይር", "ጨምር", "ቀንስ", "አጥፋ", "አስተካክል", "አሳጥር", "አጠናክር", "ጻፍ",
-            "አስገባ", "አውጣ", "ተካ", "ገምግም", "revise", "edit", "change", "add", "remove",
-            "shorten", "update", "rewrite", "strengthen", "modify",
+            "አሻሽል", "አሻሽለው", "አሻሽለህ", "ቀይር", "ቀይረው", "ለውጥ",
+            "ጨምር", "ጨምርበት", "ጨምረው", "ጨምረህ", "አክል",
+            "ቀንስ", "ቀንስበት", "ቀንሰው", "ቀንሰህ", "አስወግድ", "አንሳ",
+            "አጥፋ", "አጥፋው", "ደምስስ", "አስተካክል", "አስተካክለው", "አርም",
+            "አሳጥር", "አጠናክር", "ጻፍ", "አስገባ", "አውጣ", "ተካ", "ተካው", "ገምግም",
+            "revise", "edit", "change", "add", "insert", "expand",
+            "remove", "delete", "trim", "shorten", "update", "rewrite", "strengthen", "modify",
         )
 
         fun fallbackModelFor(modelName: String): String? = when (modelName.trim().lowercase()) {
@@ -1011,8 +1074,19 @@ class GeminiJudicialService(
                 return "ጥያቄው በደህንነት መመሪያ ምክንያት ተገድቧል። እባክዎ ቃላቱን አስተካክለው ደግመው ይሞክሩ።"
             }
 
-            if (hasCause(e) { it is UnknownHostException || it is ConnectException }) {
-                return "ከAI ሰርቨር ጋር መገናኘት አልተቻለም። እባክዎ የኢንተርኔት ግንኙነትዎን ያረጋግጡ።"
+            if (hasCause(e) {
+                    it is UnknownHostException ||
+                        it is ConnectException ||
+                        it is SSLException ||
+                        it is SocketException ||
+                        it is EOFException ||
+                        it.message.orEmpty().contains("unexpected end of stream", ignoreCase = true) ||
+                        it.message.orEmpty().contains("connection reset", ignoreCase = true) ||
+                        it.message.orEmpty().contains("broken pipe", ignoreCase = true) ||
+                        it.message.orEmpty().contains("failed to connect", ignoreCase = true)
+                }
+            ) {
+                return "ከAI ሰርቨር ጋር መገናኘት አልተቻለም። የMobile Data ወይም የኢንተርኔት ግንኙነትዎ መቆራረጡን አረጋግጠው ደግመው ይሞክሩ።"
             }
 
             if (e is RestHttpException) {

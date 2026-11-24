@@ -69,14 +69,19 @@ class AudioWavRecorder {
         recordingJob = scope.launch(Dispatchers.IO) {
             val readBuf = ByteArray(bufferSize)
             val startedMs = System.currentTimeMillis()
+            var lastMeterEmitMs = 0L
             try {
                 recorder.startRecording()
                 while (isActive) {
                     val read = recorder.read(readBuf, 0, readBuf.size)
                     if (read > 0) {
                         pcmBuffer.write(readBuf, 0, read)
-                        _amplitude.value = computeNormalizedAmplitude(readBuf, read)
-                        _elapsedSeconds.value = ((System.currentTimeMillis() - startedMs) / 1000L).toInt()
+                        val now = System.currentTimeMillis()
+                        if (now - lastMeterEmitMs >= 65L) {
+                            lastMeterEmitMs = now
+                            _amplitude.value = computeNormalizedAmplitude(readBuf, read)
+                            _elapsedSeconds.value = ((now - startedMs) / 1000L).toInt()
+                        }
                     } else {
                         delay(15)
                     }

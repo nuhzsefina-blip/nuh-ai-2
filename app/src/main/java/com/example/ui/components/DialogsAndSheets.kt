@@ -40,6 +40,7 @@ import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Key
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.LockOpen
+import androidx.compose.material.icons.filled.NotificationsActive
 import androidx.compose.material.icons.filled.PictureAsPdf
 import androidx.compose.material.icons.filled.Print
 import androidx.compose.material.icons.filled.Refresh
@@ -111,11 +112,15 @@ import java.util.Locale
 fun SettingsAndKeySheet(
     settings: AppSecuritySettings,
     currentApiKeyMask: String,
+    hasNotificationPermission: Boolean,
     onDismiss: () -> Unit,
     onSaveApiKey: (String?) -> Unit,
     onSaveModels: (String, String) -> Unit,
     onToggleFlagSecure: (Boolean) -> Unit,
     onTogglePiiMasking: (Boolean) -> Unit,
+    onToggleNotifications: (Boolean) -> Unit,
+    onRequestNotificationPermission: () -> Unit,
+    onSendTestNotification: () -> Unit,
     onAutoLockChange: (Int) -> Unit,
     onThemeOverrideChange: (Boolean?) -> Unit,
 ) {
@@ -320,6 +325,59 @@ fun SettingsAndKeySheet(
                     label = { Text("ጨለማ") },
                 )
             }
+            HorizontalDivider()
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(Icons.Default.NotificationsActive, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
+                Spacer(Modifier.width(8.dp))
+                Text("ማሳወቂያዎች (Notifications)", style = MaterialTheme.typography.titleMedium)
+            }
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
+                    Text("የችሎት ቀጠሮ እና የረቂቅ ማሳወቂያዎች", style = MaterialTheme.typography.bodyMedium)
+                    Text(
+                        "የቀጠሮ ቀን ማስታወሻ፣ የወረፋ ረቂቅ ውሳኔ እና የGoogle Drive ምትኬ ማሳወቂያዎችን ይልካል።",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                Switch(
+                    checked = settings.notificationsEnabled,
+                    onCheckedChange = onToggleNotifications,
+                    modifier = Modifier.testTag("notifications_switch"),
+                )
+            }
+
+            if (!hasNotificationPermission) {
+                OutlinedButton(
+                    onClick = onRequestNotificationPermission,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(min = 48.dp)
+                        .testTag("grant_notification_permission_button"),
+                ) {
+                    Icon(Icons.Default.NotificationsActive, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Spacer(Modifier.width(8.dp))
+                    Text("የNotification ፍቃድ ስጥ")
+                }
+            } else if (settings.notificationsEnabled) {
+                OutlinedButton(
+                    onClick = onSendTestNotification,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(min = 48.dp)
+                        .testTag("test_notification_button"),
+                ) {
+                    Icon(Icons.Default.NotificationsActive, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Spacer(Modifier.width(8.dp))
+                    Text("የሙከራ Notification ላክ")
+                }
+            }
+
             Spacer(Modifier.height(20.dp))
         }
     }

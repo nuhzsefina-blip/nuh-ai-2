@@ -453,4 +453,108 @@ class RedatDagnaUnitTest {
         assertTrue(nextGreg.isNotBlank())
         assertTrue(com.example.util.JudicialPresets.allPresets.size >= 5)
     }
+
+    @Test
+    fun chatIntentClassifier_handlesAmharicAddRemoveReviseInflections() {
+        val revisionPrompts = listOf(
+            "በውሳኔው ላይ አዲስ ነጥብ ጨምርበት",
+            "ይህንን ክፍል ቀንሰው",
+            "ተደጋጋሚውን ዓረፍተ ነገር አስወግድ",
+            "የፍርድ ክፍሉን አሻሽለው",
+            "አዲስ የህግ አንቀጽ አክል",
+        )
+        revisionPrompts.forEach { prompt ->
+            assertTrue(
+                "Expected revision intent for: $prompt",
+                !GeminiJudicialService.isConversationalMessage(prompt, hasExistingDraft = true)
+            )
+        }
+    }
+
+    @Test
+    fun networkUtils_classifiesTransientCellularFailuresAccurately() {
+        assertTrue(com.example.util.NetworkUtils.isTransientNetworkFailure(java.net.SocketTimeoutException("timeout")))
+        assertTrue(com.example.util.NetworkUtils.isTransientNetworkFailure(javax.net.ssl.SSLException("Read error")))
+        assertTrue(com.example.util.NetworkUtils.isTransientNetworkFailure(java.io.EOFException("unexpected end of stream")))
+        assertTrue(com.example.util.NetworkUtils.isTransientNetworkFailure(RuntimeException(java.net.UnknownHostException("host"))))
+        assertTrue(!com.example.util.NetworkUtils.isTransientNetworkFailure(kotlinx.coroutines.CancellationException("cancelled")))
+        assertTrue(!com.example.util.NetworkUtils.isTransientNetworkFailure(IllegalArgumentException("bad input")))
+    }
+
+    @Test
+    fun draftingPrompt_includesJudgeWitnessAndEvidenceInstructions() {
+        val prompt = com.example.ai.JudicialPrompts.buildDraftingPrompt(
+            caseEntity = com.example.data.local.CaseEntity(
+                caseNumber = "51002",
+                caseType = com.example.data.local.CaseType.DIRECT_CIVIL,
+                specialInstructions = "የምስክር ቃል: አቶ ከበደ ውሉ መፈረሙን መስክረዋል።",
+            ),
+            plaintiffText = "የከሳሽ ክስ",
+            defendantText = "የተከሳሽ መልስ",
+            seedTemplate = null,
+            fewShotExamples = emptyList(),
+            badFeedbackReminders = emptyList(),
+        )
+        assertTrue(prompt.contains("የምስክር ቃል"))
+        assertTrue(prompt.contains("አቶ ከበደ"))
+    }
+
+    @Test
+    fun notificationHelper_computesAdjournmentReminderDelaysAccurately() {
+        val tz = java.util.TimeZone.getTimeZone("Africa/Addis_Ababa")
+        // Hearing date: 17/09/2018 E.C. -> 25 May 2026
+        val twoDaysBefore = java.util.Calendar.getInstance(tz).apply {
+            clear()
+            set(2026, java.util.Calendar.MAY, 23, 10, 0, 0)
+        }.timeInMillis
+        val delayTwoDaysBefore = com.example.util.NotificationHelper.computeAdjournmentReminderDelayMs(
+            ethiopianDateStr = "17/09/2018",
+            nowMs = twoDaysBefore,
+            timeZone = tz,
+        )
+        assertTrue(delayTwoDaysBefore != null && delayTwoDaysBefore > 0L)
+        assertTrue(
+            com.example.util.NotificationHelper.isDayBeforeReminderTarget(
+                ethiopianDateStr = "17/09/2018",
+                nowMs = twoDaysBefore,
+                timeZone = tz,
+            )
+        )
+
+        // Morning of hearing at 06:00 AM -> targets 07:30 AM (90 minutes = 5,400,000 ms)
+        val sameMorning = java.util.Calendar.getInstance(tz).apply {
+            clear()
+            set(2026, java.util.Calendar.MAY, 25, 6, 0, 0)
+        }.timeInMillis
+        val delaySameMorning = com.example.util.NotificationHelper.computeAdjournmentReminderDelayMs(
+            ethiopianDateStr = "17/09/2018",
+            nowMs = sameMorning,
+            timeZone = tz,
+        )
+        assertEquals(90L * 60L * 1000L, delaySameMorning)
+        assertTrue(
+            !com.example.util.NotificationHelper.isDayBeforeReminderTarget(
+                ethiopianDateStr = "17/09/2018",
+                nowMs = sameMorning,
+                timeZone = tz,
+            )
+        )
+
+        // Past hearing date returns null
+        val afterHearing = java.util.Calendar.getInstance(tz).apply {
+            clear()
+            set(2026, java.util.Calendar.MAY, 26, 9, 0, 0)
+        }.timeInMillis
+        assertEquals(
+            null,
+            com.example.util.NotificationHelper.computeAdjournmentReminderDelayMs(
+                ethiopianDateStr = "17/09/2018",
+                nowMs = afterHearing,
+                timeZone = tz,
+            )
+        )
+
+        // Invalid date string returns null
+        assertEquals(null, com.example.util.NotificationHelper.computeAdjournmentReminderDelayMs("invalid-date"))
+    }
 }

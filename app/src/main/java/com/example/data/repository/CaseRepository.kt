@@ -5,6 +5,7 @@ import androidx.paging.PagingConfig
 import androidx.paging.PagingData
 import com.example.data.local.CaseDao
 import com.example.data.local.CaseEntity
+import com.example.data.local.CaseIdentityRow
 import com.example.data.local.CaseType
 import com.example.data.local.CaseVersionEntity
 import com.example.data.local.ChatMessageEntity
@@ -12,7 +13,9 @@ import com.example.data.local.OcrCacheEntity
 import com.example.data.local.QualityRating
 import com.example.data.local.SyncStatus
 import com.example.util.CryptoUtil
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.withContext
 
 class CaseRepository(private val dao: CaseDao) {
     fun observeCase(caseId: Long): Flow<CaseEntity?> = dao.observeCaseById(caseId)
@@ -54,38 +57,39 @@ class CaseRepository(private val dao: CaseDao) {
         ).flow
     }
 
-    suspend fun saveOrUpdateCase(caseEntity: CaseEntity, createVersionSummary: String? = null): Long {
-        val now = System.currentTimeMillis()
-        val computedHash = computeCanonicalContentHash(caseEntity)
-        val updated = caseEntity.copy(
-            contentSha256 = computedHash,
-            syncStatus = SyncStatus.PENDING,
-            updatedAt = now,
-        )
-        val id = if (updated.id == 0L) {
-            dao.insertCase(updated.copy(createdAt = now))
-        } else {
-            dao.updateCase(updated)
-            updated.id
-        }
-
-        if (createVersionSummary != null) {
-            dao.insertVersion(
-                CaseVersionEntity(
-                    caseId = id,
-                    versionNumber = updated.currentVersion,
-                    issuesText = updated.issuesText,
-                    analysisText = updated.analysisText,
-                    decisionText = updated.decisionText,
-                    closingText = updated.closingText,
-                    judgeNotesText = updated.judgeNotesText,
-                    changeSummary = createVersionSummary,
-                    createdAt = now,
-                )
+    suspend fun saveOrUpdateCase(caseEntity: CaseEntity, createVersionSummary: String? = null): Long =
+        withContext(Dispatchers.IO) {
+            val now = System.currentTimeMillis()
+            val computedHash = computeCanonicalContentHash(caseEntity)
+            val updated = caseEntity.copy(
+                contentSha256 = computedHash,
+                syncStatus = SyncStatus.PENDING,
+                updatedAt = now,
             )
+            val id = if (updated.id == 0L) {
+                dao.insertCase(updated.copy(createdAt = now))
+            } else {
+                dao.updateCase(updated)
+                updated.id
+            }
+
+            if (createVersionSummary != null) {
+                dao.insertVersion(
+                    CaseVersionEntity(
+                        caseId = id,
+                        versionNumber = updated.currentVersion,
+                        issuesText = updated.issuesText,
+                        analysisText = updated.analysisText,
+                        decisionText = updated.decisionText,
+                        closingText = updated.closingText,
+                        judgeNotesText = updated.judgeNotesText,
+                        changeSummary = createVersionSummary,
+                        createdAt = now,
+                    )
+                )
+            }
+            id
         }
-        return id
-    }
 
     suspend fun deleteCase(caseId: Long) = dao.deleteCase(caseId)
 
@@ -118,8 +122,8 @@ class CaseRepository(private val dao: CaseDao) {
         pinnedKeys: Set<String> = emptySet(),
         subjectTags: Map<String, String> = emptyMap(),
         targetSubjectTag: String = "",
-    ): StyleAndReferenceContext {
-        val candidates = dao.getStyleAndReferenceCandidates()
+    ): StyleAndReferenceContext = withContext(Dispatchers.Default) {
+        val candidates = withContext(Dispatchers.IO) { dao.getStyleAndReferenceCandidates() }
         val styleExamples = candidates
             .sortedWith(
                 compareBy<CaseEntity>(
@@ -149,7 +153,7 @@ class CaseRepository(private val dao: CaseDao) {
             targetSubjectTag = targetSubjectTag,
         ).take(2)
 
-        return StyleAndReferenceContext(
+        StyleAndReferenceContext(
             styleExamples = styleExamples,
             similarReferences = similar,
         )
@@ -182,6 +186,8 @@ class CaseRepository(private val dao: CaseDao) {
     suspend fun getQueuedOfflineCases(): List<CaseEntity> = dao.getQueuedOfflineCases()
 
     suspend fun getAllNonSeedCases(): List<CaseEntity> = dao.getAllNonSeedCases()
+
+    suspend fun getNonSeedCaseIdentities(): List<CaseIdentityRow> = dao.getNonSeedCaseIdentities()
 
     fun computeCanonicalContentHash(c: CaseEntity): String {
         val canonical = buildString {

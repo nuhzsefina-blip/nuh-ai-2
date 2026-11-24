@@ -7,6 +7,7 @@ import androidx.documentfile.provider.DocumentFile
 import androidx.work.BackoffPolicy
 import androidx.work.Constraints
 import androidx.work.CoroutineWorker
+import androidx.work.Data
 import androidx.work.ExistingWorkPolicy
 import androidx.work.NetworkType
 import androidx.work.OneTimeWorkRequestBuilder
@@ -22,6 +23,7 @@ import com.example.security.GoogleDriveAuthManager
 import com.example.security.SecurePrefsManager
 import com.example.sync.GoogleDriveApiClient
 import com.example.util.CryptoUtil
+import com.example.util.NotificationHelper
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
@@ -35,7 +37,7 @@ class DriveSyncWorker(
 ) : CoroutineWorker(appContext, params) {
 
     override suspend fun doWork(): Result {
-        val prefs = SecurePrefsManager(applicationContext)
+        val prefs = SecurePrefsManager.getInstance(applicationContext)
         val db = AppDatabase.getInstance(applicationContext, prefs)
         val repo = CaseRepository(db.caseDao())
 
@@ -99,6 +101,7 @@ class DriveSyncWorker(
 
         unsynced.forEach { repo.markCaseSynced(it) }
         prefs.updateLastSyncTimestamp(timestamp)
+        NotificationHelper.showBackupCompletedNotification(applicationContext, unsynced.size)
         return Result.success()
     }
 
@@ -155,10 +158,10 @@ class OfflineDraftWorker(
 ) : CoroutineWorker(appContext, params) {
 
     override suspend fun doWork(): Result {
-        val prefs = SecurePrefsManager(applicationContext)
+        val prefs = SecurePrefsManager.getInstance(applicationContext)
         val db = AppDatabase.getInstance(applicationContext, prefs)
         val repo = CaseRepository(db.caseDao())
-        val ai = GeminiJudicialService(prefs, repo)
+        val ai = GeminiJudicialService(prefs, repo, applicationContext)
 
         val queued = repo.getQueuedOfflineCases()
         if (queued.isEmpty()) return Result.success()
@@ -182,7 +185,7 @@ class OfflineDraftWorker(
                     }
                 }
                 val parsed = latestParsed ?: continue
-                repo.saveOrUpdateCase(
+                val savedId = repo.saveOrUpdateCase(
                     caseEntity.copy(
                         issuesText = parsed.issues,
                         analysisText = parsed.analysis,
@@ -193,6 +196,13 @@ class OfflineDraftWorker(
                         syncStatus = SyncStatus.PENDING,
                     ),
                     createVersionSummary = "ከኔትወርክ ወረፋ የተሰራ የመጀመሪያ ረቂቅ (v${caseEntity.currentVersion})"
+                )
+                NotificationHelper.showDraftReadyNotification(
+                    context = applicationContext,
+                    caseId = savedId,
+                    caseNumber = caseEntity.caseNumber,
+                    version = caseEntity.currentVersion,
+                    isFromOfflineQueue = true,
                 )
             } catch (e: Exception) {
                 Log.e(TAG, "Offline queue processing failed for caseId=${caseEntity.id}", e)
@@ -215,6 +225,93 @@ class OfflineDraftWorker(
                 .build()
             WorkManager.getInstance(context.applicationContext)
                 .enqueueUniqueWork(UNIQUE_WORK_NAME, ExistingWorkPolicy.REPLACE, req)
+        }
+    }
+}
+
+class AdjournmentReminderWorker(
+    appContext: Context,
+    params: WorkerParameters,
+) : CoroutineWorker(appContext, params) {
+
+    override suspend fun doWork(): Result {
+        val prefs = SecurePrefsManager.getInstance(applicationContext)
+        if (!prefs.settings.value.notificationsEnabled) return Result.success()
+
+        val caseKey = inputData.getString(KEY_CASE_KEY).orEmpty()
+        val ethiopianDate = inputData.getString(KEY_ETHIOPIAN_DATE).orEmpty()
+        if (ethiopianDate.isBlank()) return Result.success()
+
+        // Ensure reminder wasn't cleared or rescheduled to a different date
+        if (caseKey.isNotBlank()) {
+            val savedDate = prefs.settings.value.adjournmentDates[caseKey]
+            if (savedDate.isNullOrBlank() || savedDate != ethiopianDate) {
+                return Result.success()
+            }
+        }
+
+        val caseId = inputData.getLong(KEY_CASE_ID, -1L)
+        val caseNumber = inputData.getString(KEY_CASE_NUMBER).orEmpty()
+        val partiesSummary = inputData.getString(KEY_PARTIES).orEmpty()
+        val isDayBefore = NotificationHelper.isDayBeforeReminderTarget(ethiopianDate)
+
+        NotificationHelper.showAdjournmentReminder(
+            context = applicationContext,
+            caseId = caseId,
+            caseNumber = caseNumber,
+            ethiopianDate = ethiopianDate,
+            partiesSummary = partiesSummary,
+            isDayBefore = isDayBefore,
+        )
+        return Result.success()
+    }
+
+    companion object {
+        private const val KEY_CASE_ID = "case_id"
+        private const val KEY_CASE_KEY = "case_key"
+        private const val KEY_CASE_NUMBER = "case_number"
+        private const val KEY_PARTIES = "parties"
+        private const val KEY_ETHIOPIAN_DATE = "ethiopian_date"
+
+        private fun uniqueWorkName(caseKey: String): String =
+            "redat_dagna_adjournment_${caseKey.hashCode()}"
+
+        fun schedule(
+            context: Context,
+            caseKey: String,
+            caseId: Long,
+            caseNumber: String,
+            partiesSummary: String,
+            ethiopianDate: String,
+        ): Boolean {
+            val delayMs = NotificationHelper.computeAdjournmentReminderDelayMs(ethiopianDate)
+            if (delayMs == null) {
+                cancel(context, caseKey)
+                return false
+            }
+
+            val input = Data.Builder()
+                .putLong(KEY_CASE_ID, caseId)
+                .putString(KEY_CASE_KEY, caseKey)
+                .putString(KEY_CASE_NUMBER, caseNumber)
+                .putString(KEY_PARTIES, partiesSummary)
+                .putString(KEY_ETHIOPIAN_DATE, ethiopianDate)
+                .build()
+
+            val req = OneTimeWorkRequestBuilder<AdjournmentReminderWorker>()
+                .setInitialDelay(delayMs, TimeUnit.MILLISECONDS)
+                .setInputData(input)
+                .build()
+
+            WorkManager.getInstance(context.applicationContext)
+                .enqueueUniqueWork(uniqueWorkName(caseKey), ExistingWorkPolicy.REPLACE, req)
+            return true
+        }
+
+        fun cancel(context: Context, caseKey: String) {
+            if (caseKey.isBlank()) return
+            WorkManager.getInstance(context.applicationContext)
+                .cancelUniqueWork(uniqueWorkName(caseKey))
         }
     }
 }

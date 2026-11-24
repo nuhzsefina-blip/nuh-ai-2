@@ -202,7 +202,8 @@ object JudicialPrompts {
         sb.appendLine("ከሳሽ/ይግባኝ ባይ: ${caseEntity.plaintiffName.ifBlank { "[ከሰነዱ ውሰድ]" }} | ጠበቃ: ${caseEntity.plaintiffCounsel.ifBlank { "-" }}")
         sb.appendLine("ተከሳሽ/መልስ ሰጪ: ${caseEntity.defendantName.ifBlank { "[ከሰነዱ ውሰድ]" }} | ጠበቃ/ነገረፈጅ: ${caseEntity.defendantCounsel.ifBlank { "-" }}")
         if (caseEntity.specialInstructions.isNotBlank()) {
-            sb.appendLine("የዳኛው ልዩ መመሪያ: ${caseEntity.specialInstructions}")
+            sb.appendLine("### የዳኛው ልዩ መመሪያ፣ የምስክር ቃል እና በፍርድ ቤት የቀረቡ ማስረጃዎች (በማስረጃ ምዘናና በትንታኔ ውስጥ በጥንቃቄ ተጠቀም)")
+            sb.appendLine(caseEntity.specialInstructions)
         }
         sb.appendLine()
         sb.appendLine("### የከሳሽ / ይግባኝ ባይ ሰነዶች ጽሁፍ")

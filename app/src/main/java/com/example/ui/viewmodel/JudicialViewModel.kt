@@ -3,8 +3,6 @@ package com.example.ui.viewmodel
 import android.content.Context
 import android.content.Intent
 import android.content.IntentSender
-import android.net.ConnectivityManager
-import android.net.NetworkCapabilities
 import android.net.Uri
 import android.util.Log
 import androidx.lifecycle.ViewModel
@@ -57,7 +55,10 @@ import com.example.util.EthiopianCalendarUtil
 import com.example.util.ImageProcessor
 import com.example.util.JudicialDocumentFormatter
 import com.example.util.JudicialPreset
+import com.example.util.NetworkUtils
+import com.example.util.NotificationHelper
 import com.example.util.PastJudgmentParser
+import com.example.work.AdjournmentReminderWorker
 import com.example.work.DriveSyncWorker
 import com.example.work.OfflineDraftWorker
 import com.google.firebase.Firebase
@@ -100,6 +101,12 @@ enum class WorkSubTab(val label: String) {
     DISCUSSION("ውይይትና ማጠቃለያ"),
 }
 
+enum class AttachmentTarget {
+    PLAINTIFF,
+    DEFENDANT,
+    JUDGE_INSTRUCTIONS,
+}
+
 sealed interface PipelineState {
     data object Idle : PipelineState
     data class ProcessingImages(val message: String) : PipelineState
@@ -134,10 +141,10 @@ class JudicialViewModel(
     private val firestoreRepo: FirestoreSyncRepository,
     private val currentUserId: String,
 ) : ViewModel() {
-    val prefs = SecurePrefsManager(appContext)
+    val prefs = SecurePrefsManager.getInstance(appContext)
     private val db = AppDatabase.getInstance(appContext, prefs)
     private val repository = CaseRepository(db.caseDao())
-    private val aiService = GeminiJudicialService(prefs, repository)
+    private val aiService = GeminiJudicialService(prefs, repository, appContext)
     private val pdfGenerator = JudicialPdfGenerator(appContext, prefs, repository)
     private val wavRecorder = AudioWavRecorder()
 
@@ -154,6 +161,9 @@ class JudicialViewModel(
 
     private val _lastActiveTimestamp = MutableStateFlow(System.currentTimeMillis())
 
+    @Volatile
+    private var isAppInForeground: Boolean = true
+
     private val _activeCase = MutableStateFlow(createFreshCase())
     val activeCase: StateFlow<CaseEntity> = _activeCase.asStateFlow()
 
@@ -162,6 +172,11 @@ class JudicialViewModel(
 
     private val _defendantAttachments = MutableStateFlow<List<DocumentAttachment>>(emptyList())
     val defendantAttachments: StateFlow<List<DocumentAttachment>> = _defendantAttachments.asStateFlow()
+
+    private val _judgeInstructionAttachments = MutableStateFlow<List<DocumentAttachment>>(emptyList())
+    val judgeInstructionAttachments: StateFlow<List<DocumentAttachment>> = _judgeInstructionAttachments.asStateFlow()
+
+    private val extractedInstructionIds = HashSet<String>()
 
     private val _pipelineState = MutableStateFlow<PipelineState>(PipelineState.Idle)
     val pipelineState: StateFlow<PipelineState> = _pipelineState.asStateFlow()
@@ -230,6 +245,10 @@ class JudicialViewModel(
     private val _pendingChatDraftInjection = MutableStateFlow<String?>(null)
     val pendingChatDraftInjection: StateFlow<String?> = _pendingChatDraftInjection.asStateFlow()
 
+    // Event token incremented whenever the judge transfers a generated draft into Discussion
+    private val _discussionTransferEvent = MutableStateFlow(0L)
+    val discussionTransferEvent: StateFlow<Long> = _discussionTransferEvent.asStateFlow()
+
     // Multi-file Past Judgment Import state in Archives
     private val _archiveImportState = MutableStateFlow(ArchiveImportState())
     val archiveImportState: StateFlow<ArchiveImportState> = _archiveImportState.asStateFlow()
@@ -269,6 +288,7 @@ class JudicialViewModel(
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
     init {
+        NotificationHelper.ensureChannels(appContext)
         val user = Firebase.auth.currentUser
         if (user != null && user.uid == currentUserId) {
             prefs.setGoogleAccount(
@@ -287,7 +307,7 @@ class JudicialViewModel(
         }
 
         // Two-tier Firestore cloud case observation -> reconcile missing cloud cases into encrypted Room
-        viewModelScope.launch {
+        viewModelScope.launch(Dispatchers.IO) {
             firestoreRepo.observeCloudCases(currentUserId)
                 .catch { error ->
                     val firestoreError = generateSequence(error) { it.cause }
@@ -301,12 +321,14 @@ class JudicialViewModel(
                 }
         }
 
-        // Pipe AudioWavRecorder meter updates to AudioTranscribeUiState
+        // Pipe AudioWavRecorder meter updates to AudioTranscribeUiState only while recording
         viewModelScope.launch {
             combine(wavRecorder.amplitude, wavRecorder.elapsedSeconds) { amp, secs -> amp to secs }
                 .collect { (amp, secs) ->
-                    _audioTranscribeState.update {
-                        if (it.isRecording) it.copy(amplitude = amp, elapsedSeconds = secs) else it
+                    if (_audioTranscribeState.value.isRecording) {
+                        _audioTranscribeState.update {
+                            if (it.isRecording) it.copy(amplitude = amp, elapsedSeconds = secs) else it
+                        }
                     }
                 }
         }
@@ -315,12 +337,13 @@ class JudicialViewModel(
     private suspend fun reconcileCloudCasesToLocal(cloudCases: List<FirestoreCloudCase>) {
         if (cloudCases.isEmpty()) return
         withContext(Dispatchers.IO) {
-            val localCases = repository.getAllNonSeedCases()
-            val localHashes = localCases.mapNotNull { it.contentSha256.takeIf { h -> h.isNotBlank() } }.toSet()
-            val localCaseKeys = localCases
-                .filter { it.caseNumber.isNotBlank() }
-                .map { "${it.caseType.name}:${it.caseNumber}" }
-                .toSet()
+            val localIdentities = repository.getNonSeedCaseIdentities()
+            val localHashes = HashSet<String>(localIdentities.size)
+            val localCaseKeys = HashSet<String>(localIdentities.size)
+            for (item in localIdentities) {
+                if (item.contentSha256.isNotBlank()) localHashes.add(item.contentSha256)
+                if (item.caseNumber.isNotBlank()) localCaseKeys.add("${item.caseType.name}:${item.caseNumber}")
+            }
 
             for (remote in cloudCases) {
                 val hash = remote.contentSha256
@@ -402,6 +425,10 @@ class JudicialViewModel(
         _lastActiveTimestamp.value = System.currentTimeMillis()
     }
 
+    fun setAppInForeground(inForeground: Boolean) {
+        isAppInForeground = inForeground
+    }
+
     fun checkAutoLockTimeout() {
         val settings = securitySettings.value
         if (!settings.archiveLockEnabled) {
@@ -433,11 +460,47 @@ class JudicialViewModel(
         _workSubTab.value = subTab
     }
 
+    fun transferDraftToDiscussion(initialPrompt: String = "") {
+        touchActivity()
+        val current = _activeCase.value
+        if (!JudicialDocumentFormatter.hasDraftContent(current)) {
+            _statusBanner.value = "ወደ ውይይት ለማሸጋገር በቅድሚያ የተሰራ ውሳኔ ወይም ረቂቅ መኖር አለበት።"
+            return
+        }
+        viewModelScope.launch {
+            if (current.id == 0L && current.status != CaseStatus.FINALIZED) {
+                val savedId = repository.saveOrUpdateCase(current)
+                val saved = current.copy(id = savedId)
+                _activeCase.value = saved
+                mirrorCaseToFirestore(saved)
+            } else if (current.status != CaseStatus.FINALIZED) {
+                val savedId = repository.saveOrUpdateCase(current)
+                val saved = current.copy(id = savedId)
+                _activeCase.value = saved
+            }
+            if (initialPrompt.isNotBlank()) {
+                _pendingChatDraftInjection.value = initialPrompt
+            }
+            _discussionTransferEvent.value = System.currentTimeMillis()
+            _mainTab.value = MainMenuTab.CASE_AND_DISCUSSION
+            _workSubTab.value = WorkSubTab.DISCUSSION
+            _statusBanner.value = "ውሳኔው ወደ ውይይት ክፍል ተሸጋግሯል። የሚጨመር፣ የሚቀነስ ወይም የሚሻሻል ነጥብ ይጻፉ።"
+        }
+    }
+
+    fun returnToDraftBuilder() {
+        touchActivity()
+        _mainTab.value = MainMenuTab.CASE_AND_DISCUSSION
+        _workSubTab.value = WorkSubTab.DRAFT_BUILDER
+    }
+
     fun startNewCase() {
         cancelAiJob()
         _activeCase.value = createFreshCase()
         _plaintiffAttachments.value = emptyList()
         _defendantAttachments.value = emptyList()
+        _judgeInstructionAttachments.value = emptyList()
+        extractedInstructionIds.clear()
         _pipelineState.value = PipelineState.Idle
         _workSubTab.value = WorkSubTab.DRAFT_BUILDER
         _mainTab.value = MainMenuTab.CASE_AND_DISCUSSION
@@ -446,9 +509,22 @@ class JudicialViewModel(
     fun openExistingCase(caseEntity: CaseEntity) {
         cancelAiJob()
         _activeCase.value = caseEntity
+        _judgeInstructionAttachments.value = emptyList()
+        extractedInstructionIds.clear()
         _pipelineState.value = PipelineState.Idle
         _workSubTab.value = WorkSubTab.DRAFT_BUILDER
         _mainTab.value = MainMenuTab.CASE_AND_DISCUSSION
+    }
+
+    fun openCaseById(caseId: Long) {
+        if (caseId <= 0L) return
+        viewModelScope.launch {
+            val found = withContext(Dispatchers.IO) { repository.getCase(caseId) }
+            if (found != null) {
+                openExistingCase(found)
+                _statusBanner.value = "መ/ቁ ${found.caseNumber.ifBlank { "-" }} ተከፍቷል።"
+            }
+        }
     }
 
     fun updateActiveCaseMetadata(transform: (CaseEntity) -> CaseEntity) {
@@ -470,7 +546,7 @@ class JudicialViewModel(
         }
     }
 
-    fun addAttachments(uris: List<Uri>, isPlaintiff: Boolean) {
+    fun addAttachments(uris: List<Uri>, target: AttachmentTarget) {
         if (uris.isEmpty()) return
         viewModelScope.launch {
             _pipelineState.value = PipelineState.ProcessingImages("ፎቶ እና ሰነድ እየተጨመቀ ነው...")
@@ -488,10 +564,10 @@ class JudicialViewModel(
                         }.map { it.await() }
                     }
                 }
-                if (isPlaintiff) {
-                    _plaintiffAttachments.value = _plaintiffAttachments.value + processed
-                } else {
-                    _defendantAttachments.value = _defendantAttachments.value + processed
+                when (target) {
+                    AttachmentTarget.PLAINTIFF -> _plaintiffAttachments.value += processed
+                    AttachmentTarget.DEFENDANT -> _defendantAttachments.value += processed
+                    AttachmentTarget.JUDGE_INSTRUCTIONS -> _judgeInstructionAttachments.value += processed
                 }
                 _pipelineState.value = PipelineState.Idle
             } catch (e: CancellationException) {
@@ -504,26 +580,92 @@ class JudicialViewModel(
         }
     }
 
-    fun removeAttachment(id: String, isPlaintiff: Boolean) {
-        if (isPlaintiff) {
-            _plaintiffAttachments.value = _plaintiffAttachments.value.filterNot { it.id == id }
-        } else {
-            _defendantAttachments.value = _defendantAttachments.value.filterNot { it.id == id }
+    fun removeAttachment(id: String, target: AttachmentTarget) {
+        when (target) {
+            AttachmentTarget.PLAINTIFF -> {
+                _plaintiffAttachments.value = _plaintiffAttachments.value.filterNot { it.id == id }
+            }
+            AttachmentTarget.DEFENDANT -> {
+                _defendantAttachments.value = _defendantAttachments.value.filterNot { it.id == id }
+            }
+            AttachmentTarget.JUDGE_INSTRUCTIONS -> {
+                extractedInstructionIds.remove(id)
+                _judgeInstructionAttachments.value = _judgeInstructionAttachments.value.filterNot { it.id == id }
+            }
+        }
+    }
+
+    fun extractJudgeInstructionAttachmentsToText() {
+        val pendingAttachments = _judgeInstructionAttachments.value.filter { it.id !in extractedInstructionIds }
+        if (pendingAttachments.isEmpty()) {
+            _statusBanner.value = if (_judgeInstructionAttachments.value.isEmpty()) {
+                "በቅድሚያ የምስክር ቃል ወይም የማስረጃ ፎቶ/ሰነድ ያስገቡ።"
+            } else {
+                "የተያያዙት ፎቶዎች/ሰነዶች ጽሁፍ ቀድሞ ወደ መመሪያው ተገልብጧል።"
+            }
+            return
+        }
+        if (!isNetworkAvailable() && pendingAttachments.any { it.processedPages.isNotEmpty() }) {
+            _pipelineState.value = PipelineState.Error("አውታረ መረብ የለም። ፎቶዎችን ለማንበብ ኢንተርኔት ያስፈልጋል።")
+            return
+        }
+
+        cancelAiJob()
+        activeAiJob = viewModelScope.launch {
+            val startMsg = if (NetworkUtils.isCellularConnection(appContext)) {
+                "በMobile Data የምስክር ቃል/ማስረጃ ፎቶዎች በመነበብ ላይ..."
+            } else {
+                "የምስክር ቃል/ማስረጃ ፎቶዎች በመነበብ ላይ..."
+            }
+            _pipelineState.value = PipelineState.ReadingOcr(startMsg)
+            try {
+                val res = aiService.runParallelOcr(
+                    pendingAttachments,
+                    "የምስክር ቃል / የፍርድ ቤት ማስረጃ",
+                ) { msg ->
+                    _pipelineState.value = PipelineState.ReadingOcr(msg)
+                }
+                extractedInstructionIds.addAll(pendingAttachments.map { it.id })
+                val extractedText = res.combinedText.trim()
+                if (extractedText.isNotBlank()) {
+                    _activeCase.update { cur ->
+                        val block = "[የምስክር ቃል / በፍርድ ቤት የቀረበ ማስረጃ (ከፎቶ የተነበበ)]:\n$extractedText"
+                        val nextInstructions = if (cur.specialInstructions.isBlank()) {
+                            block
+                        } else {
+                            "${cur.specialInstructions.trimEnd()}\n\n$block"
+                        }
+                        cur.copy(specialInstructions = nextInstructions)
+                    }
+                    _statusBanner.value = "${res.totalPages} ገጽ የምስክር ቃል/ማስረጃ ወደ ልዩ መመሪያ ገብቷል።"
+                } else {
+                    _statusBanner.value = "ከተያያዙት ፋይሎች የሚነበብ ጽሁፍ አልተገኘም።"
+                }
+                _pipelineState.value = PipelineState.Idle
+            } catch (e: CancellationException) {
+                _pipelineState.value = PipelineState.Idle
+                throw e
+            } catch (e: Exception) {
+                _pipelineState.value = PipelineState.Error(GeminiJudicialService.friendlyError(e))
+            }
         }
     }
 
     fun startStage1Ocr() {
         val pList = _plaintiffAttachments.value
         val dList = _defendantAttachments.value
+        val jPending = _judgeInstructionAttachments.value.filter { it.id !in extractedInstructionIds }
         val current = _activeCase.value
-        if (pList.isEmpty() && dList.isEmpty() &&
-            current.ocrPlaintiffText.isBlank() && current.ocrDefendantText.isBlank()
+        if (pList.isEmpty() && dList.isEmpty() && jPending.isEmpty() &&
+            current.ocrPlaintiffText.isBlank() &&
+            current.ocrDefendantText.isBlank() &&
+            current.specialInstructions.isBlank()
         ) {
-            _pipelineState.value = PipelineState.Error("እባክዎ መጀመሪያ የከሳሽ ወይም የተከሳሽ ሰነድ/ፎቶ ይምረጡ።")
+            _pipelineState.value = PipelineState.Error("እባክዎ መጀመሪያ የከሳሽ፣ የተከሳሽ ወይም የማስረጃ ሰነድ/ፎቶ ይምረጡ።")
             return
         }
 
-        if (pList.isEmpty() && dList.isEmpty()) {
+        if (pList.isEmpty() && dList.isEmpty() && jPending.isEmpty()) {
             _pipelineState.value = PipelineState.AwaitingOcrReview(
                 plaintiffText = current.ocrPlaintiffText,
                 defendantText = current.ocrDefendantText,
@@ -532,16 +674,24 @@ class JudicialViewModel(
             return
         }
 
-        if (!isNetworkAvailable() && (pList.any { it.processedPages.isNotEmpty() } || dList.any { it.processedPages.isNotEmpty() })) {
+        val needsInternet = pList.any { it.processedPages.isNotEmpty() } ||
+            dList.any { it.processedPages.isNotEmpty() } ||
+            jPending.any { it.processedPages.isNotEmpty() }
+        if (!isNetworkAvailable() && needsInternet) {
             _pipelineState.value = PipelineState.Error("አውታረ መረብ የለም። ፎቶዎችን ለማንበብ ኢንተርኔት ያስፈልጋል።")
             return
         }
 
         cancelAiJob()
         activeAiJob = viewModelScope.launch {
-            _pipelineState.value = PipelineState.ReadingOcr("ፎቶዎች ተጨምቀው በመነበብ ላይ...")
+            val readingStartMsg = if (NetworkUtils.isCellularConnection(appContext)) {
+                "በMobile Data ፎቶዎች በጥንቃቄ በመነበብ ላይ..."
+            } else {
+                "ፎቶዎች ተጨምቀው በመነበብ ላይ..."
+            }
+            _pipelineState.value = PipelineState.ReadingOcr(readingStartMsg)
             try {
-                val (pRes, dRes) = coroutineScope {
+                val (pRes, dRes, jRes) = coroutineScope {
                     val pJob = async {
                         aiService.runParallelOcr(pList, "የከሳሽ ሰነድ") { msg ->
                             _pipelineState.value = PipelineState.ReadingOcr(msg)
@@ -552,25 +702,47 @@ class JudicialViewModel(
                             _pipelineState.value = PipelineState.ReadingOcr(msg)
                         }
                     }
-                    pJob.await() to dJob.await()
+                    val jJob = async {
+                        if (jPending.isEmpty()) null
+                        else aiService.runParallelOcr(jPending, "የምስክር ቃል / የፍርድ ቤት ማስረጃ") { msg ->
+                            _pipelineState.value = PipelineState.ReadingOcr(msg)
+                        }
+                    }
+                    Triple(pJob.await(), dJob.await(), jJob.await())
                 }
-                val totalMs = maxOf(pRes.elapsedMs, dRes.elapsedMs)
-                val totalPages = pRes.totalPages + dRes.totalPages
-                val totalCacheHits = pRes.cacheHits + dRes.cacheHits
+                if (jPending.isNotEmpty()) {
+                    extractedInstructionIds.addAll(jPending.map { it.id })
+                }
+
+                val totalMs = maxOf(pRes.elapsedMs, dRes.elapsedMs, jRes?.elapsedMs ?: 0L)
+                val totalPages = pRes.totalPages + dRes.totalPages + (jRes?.totalPages ?: 0)
+                val totalCacheHits = pRes.cacheHits + dRes.cacheHits + (jRes?.cacheHits ?: 0)
                 val summary = "${totalPages} ገጽ በ ${(totalMs / 1000.0).let { "%.1f".format(it) }} ሰከንድ ተነቧል (ከመሸጎጫ: $totalCacheHits)"
 
                 val pTextCombined = pRes.combinedText.ifBlank { _activeCase.value.ocrPlaintiffText }
                 val dTextCombined = dRes.combinedText.ifBlank { _activeCase.value.ocrDefendantText }
-                val autoMerged = mergeOcrMetadataIntoCase(
-                    current = _activeCase.value.copy(
-                        ocrPlaintiffText = pTextCombined,
-                        ocrDefendantText = dTextCombined,
-                        ocrTimeMs = totalMs,
-                    ),
-                    pText = pTextCombined,
-                    dText = dTextCombined,
-                    overwriteExisting = false,
-                )
+                val jTextExtracted = jRes?.combinedText?.trim().orEmpty()
+                val nextInstructions = if (jTextExtracted.isNotBlank()) {
+                    val block = "[የምስክር ቃል / በፍርድ ቤት የቀረበ ማስረጃ (ከፎቶ የተነበበ)]:\n$jTextExtracted"
+                    val existing = _activeCase.value.specialInstructions
+                    if (existing.isBlank()) block else "${existing.trimEnd()}\n\n$block"
+                } else {
+                    _activeCase.value.specialInstructions
+                }
+
+                val autoMerged = withContext(Dispatchers.Default) {
+                    mergeOcrMetadataIntoCase(
+                        current = _activeCase.value.copy(
+                            ocrPlaintiffText = pTextCombined,
+                            ocrDefendantText = dTextCombined,
+                            specialInstructions = nextInstructions,
+                            ocrTimeMs = totalMs,
+                        ),
+                        pText = pTextCombined,
+                        dText = dTextCombined,
+                        overwriteExisting = false,
+                    )
+                }
                 val updated = autoMerged.first
                 val savedId = repository.saveOrUpdateCase(updated)
                 val savedCase = updated.copy(id = savedId)
@@ -617,12 +789,16 @@ class JudicialViewModel(
             _statusBanner.value = "በቅድሚያ የOCR ጽሁፍ መኖር አለበት።"
             return
         }
-        val (merged, count) = mergeOcrMetadataIntoCase(current, pText, dText, overwriteExisting)
-        _activeCase.value = merged
-        _statusBanner.value = if (count > 0) {
-            "ከOCR የተገኙ $count መረጃዎች (የመ/ቁ / ተከራካሪዎች / ቀን) ተሞልተዋል።"
-        } else {
-            "ተጨማሪ የሚሞላ አዲስ መረጃ አልተገኘም።"
+        viewModelScope.launch {
+            val (merged, count) = withContext(Dispatchers.Default) {
+                mergeOcrMetadataIntoCase(current, pText, dText, overwriteExisting)
+            }
+            _activeCase.value = merged
+            _statusBanner.value = if (count > 0) {
+                "ከOCR የተገኙ $count መረጃዎች (የመ/ቁ / ተከራካሪዎች / ቀን) ተሞልተዋል።"
+            } else {
+                "ተጨማሪ የሚሞላ አዲስ መረጃ አልተገኘም።"
+            }
         }
     }
 
@@ -703,7 +879,7 @@ class JudicialViewModel(
             else -> caseNow.ocrPlaintiffText to caseNow.ocrDefendantText
         }
 
-        if (pText.isBlank() && dText.isBlank()) {
+        if (pText.isBlank() && dText.isBlank() && caseNow.specialInstructions.isBlank()) {
             _pipelineState.value = PipelineState.Error("የሚተነተን ጽሁፍ የለም። እባክዎ ንባብ ያካሂዱ።")
             return
         }
@@ -806,6 +982,15 @@ class JudicialViewModel(
                 mirrorCaseToFirestore(saved)
                 _pipelineState.value = PipelineState.Idle
                 _statusBanner.value = "ረቂቅ ውሳኔው ተዘጋጅቷል (v$nextVer)።"
+                if (!isAppInForeground) {
+                    NotificationHelper.showDraftReadyNotification(
+                        context = appContext,
+                        caseId = saved.id,
+                        caseNumber = saved.caseNumber,
+                        version = nextVer,
+                        isFromOfflineQueue = false,
+                    )
+                }
             } catch (e: CancellationException) {
                 _pipelineState.value = PipelineState.Idle
                 throw e
@@ -1132,7 +1317,9 @@ class JudicialViewModel(
 
         viewModelScope.launch {
             val nextVer = current.currentVersion + 1
-            val parsed = GeminiJudicialService.parseSections(revised)
+            val parsed = withContext(Dispatchers.Default) {
+                GeminiJudicialService.parseSections(revised)
+            }
             val unifiedRevised = parsed.analysis.ifBlank { revised.trim() }
             val updated = current.copy(
                 issuesText = "",
@@ -1563,11 +1750,50 @@ class JudicialViewModel(
         val keys = PastJudgmentParser.caseKeys(caseEntity)
         if (keys.isEmpty()) return
         prefs.setAdjournmentDate(keys, ethiopianDate)
-        _statusBanner.value = if (ethiopianDate.isNullOrBlank()) {
-            "የቀጠሮ ቀን ተሰርዟል።"
+        val primaryKey = keys.first()
+        if (ethiopianDate.isNullOrBlank()) {
+            keys.forEach { AdjournmentReminderWorker.cancel(appContext, it) }
+            _statusBanner.value = "የቀጠሮ ቀን ተሰርዟል።"
         } else {
-            "የቀጠሮ ቀን: $ethiopianDate ዓ.ም ተመዝግቧል።"
+            val parties = listOfNotNull(
+                caseEntity.plaintiffName.takeIf { it.isNotBlank() },
+                caseEntity.defendantName.takeIf { it.isNotBlank() },
+            ).joinToString(" እና ")
+            val scheduled = if (prefs.settings.value.notificationsEnabled) {
+                AdjournmentReminderWorker.schedule(
+                    context = appContext,
+                    caseKey = primaryKey,
+                    caseId = caseEntity.id,
+                    caseNumber = caseEntity.caseNumber,
+                    partiesSummary = parties,
+                    ethiopianDate = ethiopianDate.trim(),
+                )
+            } else false
+            _statusBanner.value = if (scheduled) {
+                "የቀጠሮ ቀን: $ethiopianDate ዓ.ም እና Notification ማስታወሻ ተመዝግቧል።"
+            } else {
+                "የቀጠሮ ቀን: $ethiopianDate ዓ.ም ተመዝግቧል።"
+            }
         }
+    }
+
+    fun toggleNotifications(enabled: Boolean) {
+        prefs.setNotificationsEnabled(enabled)
+        _statusBanner.value = if (enabled) {
+            "የመተግበሪያው Notification ተከፍቷል።"
+        } else {
+            "የመተግበሪያው Notification ታግዷል።"
+        }
+    }
+
+    fun sendTestNotification(): Boolean {
+        val sent = NotificationHelper.showTestNotification(appContext)
+        _statusBanner.value = if (sent) {
+            "የሙከራ Notification ተልኳል — የስልክዎን የማሳወቂያ ክፍል ይመልከቱ።"
+        } else {
+            "Notification መላክ አልተቻለም፤ እባክዎ የNotification ፍቃድ እና ማብሪያ/ማጥፊያውን ያረጋግጡ።"
+        }
+        return sent
     }
 
     fun renameArchivedCase(caseEntity: CaseEntity, newCaseNumber: String) {
@@ -1589,6 +1815,7 @@ class JudicialViewModel(
             val keys = PastJudgmentParser.caseKeys(caseEntity)
             repository.deleteCase(caseEntity.id)
             prefs.clearCaseExtras(keys)
+            keys.forEach { AdjournmentReminderWorker.cancel(appContext, it) }
             if (_activeCase.value.id == caseEntity.id) {
                 _activeCase.value = createFreshCase()
             }
@@ -1688,41 +1915,39 @@ class JudicialViewModel(
                         return@forEachIndexed
                     }
 
-                    val parsedMeta = com.example.util.PastJudgmentParser.parseMetadata(
-                        rawText = extractedRaw,
-                        fallbackFileName = att.displayName,
-                    )
-
-                    val candidate = CaseEntity(
-                        caseNumber = parsedMeta.caseNumber,
-                        caseType = parsedMeta.caseType,
-                        ethiopianDate = parsedMeta.ethiopianDate,
-                        gregorianDate = parsedMeta.gregorianDate,
-                        judges = parsedMeta.judges,
-                        plaintiffName = parsedMeta.plaintiffName,
-                        defendantName = parsedMeta.defendantName,
-                        specialInstructions = "${com.example.util.PastJudgmentParser.UPLOADED_REF_PREFIX} ${att.displayName}",
-                        issuesText = "",
-                        analysisText = extractedRaw,
-                        decisionText = "",
-                        closingText = "",
-                        judgeNotesText = "${com.example.util.PastJudgmentParser.UPLOADED_REF_NOTE_MARKER} — Style & Reference] ከፋይል: ${att.displayName}",
-                        status = CaseStatus.FINALIZED,
-                        qualityRating = QualityRating.EXCELLENT,
-                        currentVersion = 1,
-                    )
-
-                    val hash = repository.computeCanonicalContentHash(candidate)
+                    val (candidate, hash) = withContext(Dispatchers.Default) {
+                        val parsedMeta = PastJudgmentParser.parseMetadata(
+                            rawText = extractedRaw,
+                            fallbackFileName = att.displayName,
+                        )
+                        val entity = CaseEntity(
+                            caseNumber = parsedMeta.caseNumber,
+                            caseType = parsedMeta.caseType,
+                            ethiopianDate = parsedMeta.ethiopianDate,
+                            gregorianDate = parsedMeta.gregorianDate,
+                            judges = parsedMeta.judges,
+                            plaintiffName = parsedMeta.plaintiffName,
+                            defendantName = parsedMeta.defendantName,
+                            specialInstructions = "${PastJudgmentParser.UPLOADED_REF_PREFIX} ${att.displayName}",
+                            issuesText = "",
+                            analysisText = extractedRaw,
+                            decisionText = "",
+                            closingText = "",
+                            judgeNotesText = "${PastJudgmentParser.UPLOADED_REF_NOTE_MARKER} — Style & Reference] ከፋይል: ${att.displayName}",
+                            status = CaseStatus.FINALIZED,
+                            qualityRating = QualityRating.EXCELLENT,
+                            currentVersion = 1,
+                        )
+                        entity to repository.computeCanonicalContentHash(entity)
+                    }
                     val existing = withContext(Dispatchers.IO) { repository.findByHash(hash) }
                     if (existing != null) {
                         duplicateCount++
                     } else {
-                        val savedId = withContext(Dispatchers.IO) {
-                            repository.saveOrUpdateCase(
-                                candidate,
-                                createVersionSummary = "ከፋይል የተጫነ የቀድሞ ውሳኔ (${att.displayName})"
-                            )
-                        }
+                        val savedId = repository.saveOrUpdateCase(
+                            candidate,
+                            createVersionSummary = "ከፋይል የተጫነ የቀድሞ ውሳኔ (${att.displayName})"
+                        )
                         val saved = candidate.copy(id = savedId, contentSha256 = hash)
                         mirrorCaseToFirestore(saved)
                         importedCount++
@@ -2063,12 +2288,7 @@ class JudicialViewModel(
         _statusBanner.value = null
     }
 
-    private fun isNetworkAvailable(): Boolean {
-        val cm = appContext.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
-        val network = cm.activeNetwork ?: return false
-        val caps = cm.getNetworkCapabilities(network) ?: return false
-        return caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
-    }
+    private fun isNetworkAvailable(): Boolean = NetworkUtils.isNetworkAvailable(appContext)
 
     private fun createFreshCase(): CaseEntity {
         val todayEt = EthiopianCalendarUtil.todayEthiopian()

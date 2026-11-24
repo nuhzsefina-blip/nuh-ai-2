@@ -1,5 +1,6 @@
 package com.example.sync
 
+import com.example.util.NetworkUtils
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.MediaType.Companion.toMediaType
@@ -11,7 +12,6 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.io.IOException
 import java.net.URLEncoder
-import java.util.concurrent.TimeUnit
 
 data class DriveBackupFile(
     val id: String,
@@ -21,11 +21,12 @@ data class DriveBackupFile(
 )
 
 class GoogleDriveApiClient(
-    private val client: OkHttpClient = OkHttpClient.Builder()
-        .connectTimeout(25, TimeUnit.SECONDS)
-        .readTimeout(45, TimeUnit.SECONDS)
-        .writeTimeout(45, TimeUnit.SECONDS)
-        .build()
+    private val client: OkHttpClient = NetworkUtils.createMobileResilientOkHttpClient(
+        connectTimeoutSec = 35L,
+        readTimeoutSec = 60L,
+        writeTimeoutSec = 90L,
+        callTimeoutSec = 150L,
+    )
 ) {
     suspend fun ensureBackupFolderId(accessToken: String): String = withContext(Dispatchers.IO) {
         val query = "name = '$BACKUP_FOLDER_NAME' and mimeType = '$FOLDER_MIME_TYPE' and trashed = false"

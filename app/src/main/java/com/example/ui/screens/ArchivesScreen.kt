@@ -553,9 +553,15 @@ fun ArchivesScreen(
                             key = pagedCases.itemKey { it.id },
                         ) { index ->
                             val item = pagedCases[index] ?: return@items
-                            val itemPinned = PastJudgmentParser.matchesAnyKey(settingsPinnedKeys, item)
-                            val itemTag = PastJudgmentParser.resolveMapValue(settingsSubjectTags, item)
-                            val itemAdjournment = PastJudgmentParser.resolveMapValue(settingsAdjournmentDates, item)
+                            val itemPinned = remember(item.id, item.contentSha256, settingsPinnedKeys) {
+                                PastJudgmentParser.matchesAnyKey(settingsPinnedKeys, item)
+                            }
+                            val itemTag = remember(item.id, item.contentSha256, settingsSubjectTags) {
+                                PastJudgmentParser.resolveMapValue(settingsSubjectTags, item)
+                            }
+                            val itemAdjournment = remember(item.id, item.contentSha256, settingsAdjournmentDates) {
+                                PastJudgmentParser.resolveMapValue(settingsAdjournmentDates, item)
+                            }
                             ArchiveCaseCard(
                                 caseEntity = item,
                                 isPinned = itemPinned,
@@ -612,7 +618,9 @@ private fun ArchiveCaseCard(
     onOpenRename: () -> Unit = {},
     onRequestDelete: () -> Unit = {},
 ) {
-    val isUploadedRef = PastJudgmentParser.isUploadedReferenceCase(caseEntity)
+    val isUploadedRef = remember(caseEntity.id, caseEntity.specialInstructions, caseEntity.judgeNotesText) {
+        PastJudgmentParser.isUploadedReferenceCase(caseEntity)
+    }
     ElevatedCard(
         modifier = Modifier.fillMaxWidth().testTag("archive_case_card_${caseEntity.id}"),
         shape = RoundedCornerShape(16.dp),
@@ -665,7 +673,14 @@ private fun ArchiveCaseCard(
                 )
             }
 
-            val snippet = JudicialDocumentFormatter.extractPreviewSnippet(caseEntity)
+            val snippet = remember(
+                caseEntity.id,
+                caseEntity.updatedAt,
+                caseEntity.analysisText,
+                caseEntity.issuesText,
+            ) {
+                JudicialDocumentFormatter.extractPreviewSnippet(caseEntity)
+            }
             if (snippet.isNotBlank()) {
                 Text(
                     snippet,

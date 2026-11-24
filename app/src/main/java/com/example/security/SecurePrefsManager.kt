@@ -10,6 +10,7 @@ import com.example.util.CryptoUtil
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
 import java.security.SecureRandom
 
 data class AppSecuritySettings(
@@ -32,6 +33,7 @@ data class AppSecuritySettings(
     val pinnedStyleKeys: Set<String> = emptySet(),
     val subjectTags: Map<String, String> = emptyMap(),
     val adjournmentDates: Map<String, String> = emptyMap(),
+    val notificationsEnabled: Boolean = true,
 ) {
     companion object {
         const val DEFAULT_OCR_MODEL = "gemini-3.5-flash-lite"
@@ -103,6 +105,7 @@ class SecurePrefsManager(context: Context) {
             pinnedStyleKeys = prefs.getStringSet(KEY_PINNED_STYLES, emptySet())?.toSet() ?: emptySet(),
             subjectTags = decodeStringMap(prefs.getString(KEY_SUBJECT_TAGS, null)),
             adjournmentDates = decodeStringMap(prefs.getString(KEY_ADJOURNMENT_DATES, null)),
+            notificationsEnabled = prefs.getBoolean(KEY_NOTIFICATIONS_ENABLED, true),
         )
     }
 
@@ -113,7 +116,7 @@ class SecurePrefsManager(context: Context) {
         prefs.edit {
             if (cleaned.isEmpty()) remove(KEY_API_KEY) else putString(KEY_API_KEY, cleaned)
         }
-        _settings.value = loadSettings()
+        _settings.update { it.copy(hasCustomApiKey = cleaned.isNotEmpty()) }
     }
 
     fun setModels(ocrModel: String, draftingModel: String) {
@@ -123,32 +126,38 @@ class SecurePrefsManager(context: Context) {
             putString(KEY_OCR_MODEL, ocr)
             putString(KEY_DRAFT_MODEL, draft)
         }
-        _settings.value = loadSettings()
+        _settings.update { it.copy(ocrModelName = ocr, draftingModelName = draft) }
     }
 
     fun setFlagSecure(enabled: Boolean) {
         prefs.edit { putBoolean(KEY_FLAG_SECURE, enabled) }
-        _settings.value = loadSettings()
+        _settings.update { it.copy(flagSecureEnabled = enabled) }
     }
 
     fun setPiiMasking(enabled: Boolean) {
         prefs.edit { putBoolean(KEY_PII_MASKING, enabled) }
-        _settings.value = loadSettings()
+        _settings.update { it.copy(piiMaskingEnabled = enabled) }
+    }
+
+    fun setNotificationsEnabled(enabled: Boolean) {
+        prefs.edit { putBoolean(KEY_NOTIFICATIONS_ENABLED, enabled) }
+        _settings.update { it.copy(notificationsEnabled = enabled) }
     }
 
     fun setArchiveLock(enabled: Boolean) {
         prefs.edit { putBoolean(KEY_ARCHIVE_LOCK, enabled) }
-        _settings.value = loadSettings()
+        _settings.update { it.copy(archiveLockEnabled = enabled) }
     }
 
     fun setBiometricEnabled(enabled: Boolean) {
         prefs.edit { putBoolean(KEY_BIOMETRIC_ENABLED, enabled) }
-        _settings.value = loadSettings()
+        _settings.update { it.copy(biometricEnabled = enabled) }
     }
 
     fun setAutoLockMinutes(minutes: Int) {
-        prefs.edit { putInt(KEY_AUTO_LOCK_MIN, minutes.coerceIn(1, 10)) }
-        _settings.value = loadSettings()
+        val clamped = minutes.coerceIn(1, 10)
+        prefs.edit { putInt(KEY_AUTO_LOCK_MIN, clamped) }
+        _settings.update { it.copy(autoLockMinutes = clamped) }
     }
 
     fun setDarkThemeOverride(dark: Boolean?) {
@@ -158,7 +167,7 @@ class SecurePrefsManager(context: Context) {
             null -> -1
         }
         prefs.edit { putInt(KEY_DARK_THEME, code) }
-        _settings.value = loadSettings()
+        _settings.update { it.copy(darkThemeOverride = dark) }
     }
 
     fun setPin(pin: String) {
@@ -169,7 +178,7 @@ class SecurePrefsManager(context: Context) {
             putString(KEY_PIN_SALT, saltB64)
             putString(KEY_PIN_HASH, hash)
         }
-        _settings.value = loadSettings()
+        _settings.update { it.copy(hasPinSet = true) }
     }
 
     fun verifyPin(pin: String): Boolean {
@@ -180,30 +189,45 @@ class SecurePrefsManager(context: Context) {
     }
 
     fun setDriveTreeUri(uriString: String?) {
+        val normalized = uriString?.takeIf { it.isNotBlank() }
         prefs.edit {
-            if (uriString.isNullOrBlank()) remove(KEY_DRIVE_TREE_URI)
-            else putString(KEY_DRIVE_TREE_URI, uriString)
+            if (normalized == null) remove(KEY_DRIVE_TREE_URI)
+            else putString(KEY_DRIVE_TREE_URI, normalized)
         }
-        _settings.value = loadSettings()
+        _settings.update { it.copy(driveTreeUri = normalized) }
     }
 
     fun updateLastSyncTimestamp(timestamp: Long) {
         prefs.edit { putLong(KEY_LAST_SYNC_TS, timestamp) }
-        _settings.value = loadSettings()
+        _settings.update { it.copy(lastSyncTimestamp = timestamp) }
     }
 
     fun setGoogleAccount(name: String?, email: String?, photoUrl: String?) {
-        prefs.edit {
-            if (name.isNullOrBlank()) remove(KEY_GOOGLE_NAME) else putString(KEY_GOOGLE_NAME, name)
-            if (email.isNullOrBlank()) remove(KEY_GOOGLE_EMAIL) else putString(KEY_GOOGLE_EMAIL, email)
-            if (photoUrl.isNullOrBlank()) remove(KEY_GOOGLE_PHOTO) else putString(KEY_GOOGLE_PHOTO, photoUrl)
+        val cur = _settings.value
+        val nName = name?.takeIf { it.isNotBlank() }
+        val nEmail = email?.takeIf { it.isNotBlank() }
+        val nPhoto = photoUrl?.takeIf { it.isNotBlank() }
+        if (cur.googleAccountName == nName && cur.googleAccountEmail == nEmail && cur.googleAccountPhotoUrl == nPhoto) {
+            return
         }
-        _settings.value = loadSettings()
+        prefs.edit {
+            if (nName == null) remove(KEY_GOOGLE_NAME) else putString(KEY_GOOGLE_NAME, nName)
+            if (nEmail == null) remove(KEY_GOOGLE_EMAIL) else putString(KEY_GOOGLE_EMAIL, nEmail)
+            if (nPhoto == null) remove(KEY_GOOGLE_PHOTO) else putString(KEY_GOOGLE_PHOTO, nPhoto)
+        }
+        _settings.update {
+            it.copy(
+                googleAccountName = nName,
+                googleAccountEmail = nEmail,
+                googleAccountPhotoUrl = nPhoto,
+            )
+        }
     }
 
     fun setDriveApiAuthorized(authorized: Boolean) {
+        if (_settings.value.driveApiAuthorized == authorized) return
         prefs.edit { putBoolean(KEY_DRIVE_API_AUTH, authorized) }
-        _settings.value = loadSettings()
+        _settings.update { it.copy(driveApiAuthorized = authorized) }
     }
 
     fun clearGoogleAccountSession() {
@@ -213,11 +237,18 @@ class SecurePrefsManager(context: Context) {
             remove(KEY_GOOGLE_PHOTO)
             putBoolean(KEY_DRIVE_API_AUTH, false)
         }
-        _settings.value = loadSettings()
+        _settings.update {
+            it.copy(
+                googleAccountName = null,
+                googleAccountEmail = null,
+                googleAccountPhotoUrl = null,
+                driveApiAuthorized = false,
+            )
+        }
     }
 
     fun togglePinnedStyleKey(keys: List<String>): Boolean {
-        val current = prefs.getStringSet(KEY_PINNED_STYLES, emptySet())?.toMutableSet() ?: mutableSetOf()
+        val current = _settings.value.pinnedStyleKeys.toMutableSet()
         val wasPinned = keys.any { it in current }
         if (wasPinned) {
             current.removeAll(keys.toSet())
@@ -225,39 +256,39 @@ class SecurePrefsManager(context: Context) {
             keys.firstOrNull()?.let { current.add(it) }
         }
         prefs.edit { putStringSet(KEY_PINNED_STYLES, current) }
-        _settings.value = loadSettings()
+        _settings.update { it.copy(pinnedStyleKeys = current.toSet()) }
         return !wasPinned
     }
 
     fun setSubjectTag(keys: List<String>, tag: String?) {
-        val map = decodeStringMap(prefs.getString(KEY_SUBJECT_TAGS, null)).toMutableMap()
+        val map = _settings.value.subjectTags.toMutableMap()
         keys.forEach { map.remove(it) }
         val primary = keys.firstOrNull()
         if (!tag.isNullOrBlank() && primary != null) {
             map[primary] = tag.trim()
         }
         prefs.edit { putString(KEY_SUBJECT_TAGS, encodeStringMap(map)) }
-        _settings.value = loadSettings()
+        _settings.update { it.copy(subjectTags = map.toMap()) }
     }
 
     fun setAdjournmentDate(keys: List<String>, ethiopianDate: String?) {
-        val map = decodeStringMap(prefs.getString(KEY_ADJOURNMENT_DATES, null)).toMutableMap()
+        val map = _settings.value.adjournmentDates.toMutableMap()
         keys.forEach { map.remove(it) }
         val primary = keys.firstOrNull()
         if (!ethiopianDate.isNullOrBlank() && primary != null) {
             map[primary] = ethiopianDate.trim()
         }
         prefs.edit { putString(KEY_ADJOURNMENT_DATES, encodeStringMap(map)) }
-        _settings.value = loadSettings()
+        _settings.update { it.copy(adjournmentDates = map.toMap()) }
     }
 
     fun clearCaseExtras(keys: List<String>) {
         if (keys.isEmpty()) return
         val keySet = keys.toSet()
-        val pinned = prefs.getStringSet(KEY_PINNED_STYLES, emptySet())?.toMutableSet() ?: mutableSetOf()
-        pinned.removeAll(keySet)
-        val tags = decodeStringMap(prefs.getString(KEY_SUBJECT_TAGS, null)).toMutableMap()
-        val dates = decodeStringMap(prefs.getString(KEY_ADJOURNMENT_DATES, null)).toMutableMap()
+        val cur = _settings.value
+        val pinned = cur.pinnedStyleKeys.toMutableSet().apply { removeAll(keySet) }
+        val tags = cur.subjectTags.toMutableMap()
+        val dates = cur.adjournmentDates.toMutableMap()
         keys.forEach {
             tags.remove(it)
             dates.remove(it)
@@ -267,7 +298,13 @@ class SecurePrefsManager(context: Context) {
             putString(KEY_SUBJECT_TAGS, encodeStringMap(tags))
             putString(KEY_ADJOURNMENT_DATES, encodeStringMap(dates))
         }
-        _settings.value = loadSettings()
+        _settings.update {
+            it.copy(
+                pinnedStyleKeys = pinned.toSet(),
+                subjectTags = tags.toMap(),
+                adjournmentDates = dates.toMap(),
+            )
+        }
     }
 
     private fun decodeStringMap(raw: String?): Map<String, String> {
@@ -325,6 +362,15 @@ class SecurePrefsManager(context: Context) {
     }
 
     companion object {
+        @Volatile
+        private var INSTANCE: SecurePrefsManager? = null
+
+        fun getInstance(context: Context): SecurePrefsManager {
+            return INSTANCE ?: synchronized(this) {
+                INSTANCE ?: SecurePrefsManager(context.applicationContext).also { INSTANCE = it }
+            }
+        }
+
         private const val VAULT_FILE_NAME = "redat_dagna_secure_vault"
         private const val KEY_API_KEY = "gemini_api_key"
         private const val KEY_OCR_MODEL = "ocr_model_name"
@@ -349,5 +395,6 @@ class SecurePrefsManager(context: Context) {
         private const val KEY_PINNED_STYLES = "pinned_style_keys"
         private const val KEY_SUBJECT_TAGS = "case_subject_tags_json"
         private const val KEY_ADJOURNMENT_DATES = "case_adjournment_dates_json"
+        private const val KEY_NOTIFICATIONS_ENABLED = "notifications_enabled"
     }
 }

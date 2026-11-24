@@ -11,6 +11,7 @@ import com.google.firebase.ai.type.Tool
 import com.google.firebase.ai.type.Voice
 import com.google.firebase.ai.type.content
 import com.google.firebase.ai.type.liveGenerationConfig
+import com.example.util.NetworkUtils
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -63,8 +64,10 @@ object FirebaseAiFeatures {
             }
         }
 
-        val response = withTimeout(60_000L) {
-            model.generateContent(fullPrompt)
+        val response = NetworkUtils.withMobileDataRetry(maxAttempts = 2, initialDelayMs = 650L) {
+            withTimeout(90_000L) {
+                model.generateContent(fullPrompt)
+            }
         }
 
         val candidate = response.candidates.firstOrNull()
@@ -121,8 +124,10 @@ object FirebaseAiFeatures {
             text(prompt)
         }
 
-        val response = withTimeout(60_000L) {
-            model.generateContent(input)
+        val response = NetworkUtils.withMobileDataRetry(maxAttempts = 2, initialDelayMs = 650L) {
+            withTimeout(90_000L) {
+                model.generateContent(input)
+            }
         }
 
         val text = response.text?.trim().orEmpty()
@@ -155,7 +160,7 @@ object FirebaseAiFeatures {
         )
 
         return try {
-            withTimeout(25_000L) {
+            withTimeout(40_000L) {
                 liveModel.connect()
             }
         } catch (e: CancellationException) {

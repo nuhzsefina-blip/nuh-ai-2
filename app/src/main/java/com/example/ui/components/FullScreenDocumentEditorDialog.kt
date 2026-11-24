@@ -39,6 +39,7 @@ import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -78,15 +79,25 @@ fun FullScreenDocumentEditorDialog(
         mutableStateOf(TextFieldValue(text = initialText, selection = TextRange(initialText.length)))
     }
     val undoStack = remember { mutableStateListOf<String>() }
+    val lastUndoSnapshotMs = remember { longArrayOf(0L) }
     var showFindReplace by remember { mutableStateOf(false) }
     var findQuery by remember { mutableStateOf("") }
     var replaceWith by remember { mutableStateOf("") }
     val editorFocusRequester = remember { FocusRequester() }
 
-    fun pushUndoAndUpdate(next: TextFieldValue) {
-        if (next.text != value.text) {
-            if (undoStack.size > 25) undoStack.removeAt(0)
-            undoStack.add(value.text)
+    fun pushUndoAndUpdate(next: TextFieldValue, forceUndo: Boolean = false) {
+        val prevText = value.text
+        val nextText = next.text
+        if (nextText != prevText) {
+            val now = System.currentTimeMillis()
+            val lenDelta = kotlin.math.abs(nextText.length - prevText.length)
+            val typedBoundary = lenDelta == 1 && nextText.length > prevText.length &&
+                nextText.getOrNull((next.selection.min - 1).coerceAtLeast(0))?.let { it == ' ' || it == '\n' } == true
+            if (forceUndo || undoStack.isEmpty() || lenDelta >= 12 || typedBoundary || (now - lastUndoSnapshotMs[0]) >= 800L) {
+                if (undoStack.size > 25) undoStack.removeAt(0)
+                undoStack.add(prevText)
+                lastUndoSnapshotMs[0] = now
+            }
         }
         value = next
     }
@@ -97,34 +108,23 @@ fun FullScreenDocumentEditorDialog(
         val end = value.selection.max.coerceIn(0, text.length)
         val updated = text.substring(0, start) + snippet + text.substring(end)
         val nextCursor = start + snippet.length
-        pushUndoAndUpdate(TextFieldValue(text = updated, selection = TextRange(nextCursor)))
+        pushUndoAndUpdate(TextFieldValue(text = updated, selection = TextRange(nextCursor)), forceUndo = true)
         editorFocusRequester.requestFocus()
     }
 
-    val wordCount = remember(value.text) {
-        value.text.trim().split(Regex("""\s+""")).count { it.isNotBlank() }
-    }
+    var wordCount by remember(initialText) { mutableIntStateOf(countWordsFast(initialText)) }
+    var anchors by remember(initialText) { mutableStateOf(findSectionAnchors(initialText)) }
     val charCount = value.text.length
 
-    val anchors = remember(value.text) {
-        val candidates = listOf(
-            "ራስጌ" to "የመ/ቁ",
-            "መግቢያ" to "መዝገቡ የተቀጠረው",
-            "ፍ ር ድ" to "ፍ ር ድ",
-            "ብ ይ ን" to "ብ ይ ን",
-            "ጭብጥ" to "ጭብጥ",
-            "ው ሳ ኔ" to "ው ሳ ኔ",
-            "ት ዕ ዛ ዝ" to "ት ዕ ዛ ዝ",
-        )
-        candidates.mapNotNull { (label, marker) ->
-            val idx = value.text.indexOf(marker)
-            if (idx >= 0) DocumentSectionAnchor(label, idx) else null
-        }
+    androidx.compose.runtime.LaunchedEffect(value.text) {
+        kotlinx.coroutines.delay(220L)
+        wordCount = countWordsFast(value.text)
+        anchors = findSectionAnchors(value.text)
     }
 
-    val matchCount = remember(value.text, findQuery) {
-        if (findQuery.isBlank()) 0
-        else Regex(Regex.escape(findQuery)).findAll(value.text).count()
+    val matchCount = remember(value.text, findQuery, showFindReplace) {
+        if (!showFindReplace || findQuery.isBlank()) 0
+        else countLiteralOccurrences(value.text, findQuery)
     }
 
     Dialog(
@@ -340,4 +340,48 @@ fun FullScreenDocumentEditorDialog(
             }
         }
     }
+}
+
+private fun countWordsFast(text: String): Int {
+    var count = 0
+    var inWord = false
+    for (i in 0 until text.length) {
+        val ws = text[i].isWhitespace()
+        if (!ws && !inWord) {
+            count++
+            inWord = true
+        } else if (ws) {
+            inWord = false
+        }
+    }
+    return count
+}
+
+private fun findSectionAnchors(text: String): List<DocumentSectionAnchor> {
+    val candidates = listOf(
+        "ራስጌ" to "የመ/ቁ",
+        "መግቢያ" to "መዝገቡ የተቀጠረው",
+        "ፍ ር ድ" to "ፍ ር ድ",
+        "ብ ይ ን" to "ብ ይ ን",
+        "ጭብጥ" to "ጭብጥ",
+        "ው ሳ ኔ" to "ው ሳ ኔ",
+        "ት ዕ ዛ ዝ" to "ት ዕ ዛ ዝ",
+    )
+    return candidates.mapNotNull { (label, marker) ->
+        val idx = text.indexOf(marker)
+        if (idx >= 0) DocumentSectionAnchor(label, idx) else null
+    }
+}
+
+private fun countLiteralOccurrences(text: String, query: String): Int {
+    if (query.isEmpty() || text.isEmpty()) return 0
+    var count = 0
+    var idx = 0
+    while (true) {
+        val found = text.indexOf(query, startIndex = idx)
+        if (found < 0) break
+        count++
+        idx = found + query.length
+    }
+    return count
 }

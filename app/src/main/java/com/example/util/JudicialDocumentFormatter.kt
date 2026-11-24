@@ -136,14 +136,28 @@ object JudicialDocumentFormatter {
     fun extractPreviewSnippet(c: CaseEntity): String {
         val doc = composeUnifiedDocument(c)
         if (doc.isBlank()) return c.issuesText.trim()
-        val lines = doc.lines().map { it.trim() }.filter { it.isNotBlank() }
-        val substantive = lines.firstOrNull { line ->
-            line.startsWith("ለዚህ ውሳኔ") ||
+        var firstFallback: String? = null
+        var secondFallback: String? = null
+        var scanned = 0
+        for (rawLine in doc.lineSequence()) {
+            val line = rawLine.trim()
+            if (line.isEmpty()) continue
+            if (firstFallback == null) firstFallback = line
+            else if (secondFallback == null) secondFallback = line
+
+            if (line.startsWith("ለዚህ ውሳኔ") ||
                 line.startsWith("ለዚህ ብይን") ||
                 (!isUnifiedHeadingLine(line) && !isUnifiedHeaderLabelLine(line) &&
                     !line.startsWith("መዝገቡ የተቀጠረው") && line.length > 25)
+            ) {
+                return line
+            }
+            scanned++
+            if (scanned >= 40) break
         }
-        return substantive ?: c.issuesText.ifBlank { lines.take(2).joinToString(" • ") }
+        return c.issuesText.ifBlank {
+            listOfNotNull(firstFallback, secondFallback).joinToString(" • ")
+        }
     }
 
     fun isUnifiedHeadingLine(line: String): Boolean {

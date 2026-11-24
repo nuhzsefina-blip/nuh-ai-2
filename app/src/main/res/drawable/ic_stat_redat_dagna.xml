@@ -1,0 +1,11 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24"
+    android:tint="#FFFFFF">
+    <!-- Balance scales & central judicial pillar monochrome silhouette -->
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M11,3h2v2.1c2.2,0.2 4.3,0.9 6,1.9l-1,1.7c-1.5,-0.9 -3.2,-1.4 -5,-1.6V19h4v2H7v-2h4V7.1c-1.8,0.2 -3.5,0.7 -5,1.6L5,7c1.7,-1 3.8,-1.7 6,-1.9V3zM5.5,9.5L8,15H3L5.5,9.5zM5.5,17c-1.5,0 -2.8,-0.8 -3.3,-2h6.6C8.3,16.2 7,17 5.5,17zM18.5,9.5L21,15h-5L18.5,9.5zM18.5,17c-1.5,0 -2.8,-0.8 -3.3,-2h6.6C21.3,16.2 20,17 18.5,17z" />
+</vector>

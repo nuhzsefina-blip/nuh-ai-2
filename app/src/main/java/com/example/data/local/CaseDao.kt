@@ -8,6 +8,13 @@ import androidx.room.Query
 import androidx.room.Update
 import kotlinx.coroutines.flow.Flow
 
+data class CaseIdentityRow(
+    val id: Long,
+    val caseNumber: String,
+    val caseType: CaseType,
+    val contentSha256: String,
+)
+
 @Dao
 interface CaseDao {
     @Query("SELECT * FROM cases WHERE id = :id LIMIT 1")
@@ -19,8 +26,9 @@ interface CaseDao {
     @Query(
         """
         SELECT * FROM cases 
-        WHERE isSeedTemplate = 0 
+        WHERE isSeedTemplate = 0 AND status != 'FINALIZED'
         ORDER BY updatedAt DESC
+        LIMIT 8
         """
     )
     fun observeAllWorkCases(): Flow<List<CaseEntity>>
@@ -144,6 +152,9 @@ interface CaseDao {
 
     @Query("SELECT * FROM cases WHERE isSeedTemplate = 0")
     suspend fun getAllNonSeedCases(): List<CaseEntity>
+
+    @Query("SELECT id, caseNumber, caseType, contentSha256 FROM cases WHERE isSeedTemplate = 0")
+    suspend fun getNonSeedCaseIdentities(): List<CaseIdentityRow>
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertCase(caseEntity: CaseEntity): Long
